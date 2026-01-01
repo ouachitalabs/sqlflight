@@ -1333,12 +1333,20 @@ impl Formatter {
                     self.printer.write(" is null");
                 }
             }
-            Expression::Cast { expr, data_type } => {
-                self.printer.write("cast(");
-                self.format_expression(expr);
-                self.printer.write(" as ");
-                self.format_data_type(data_type);
-                self.printer.write(")");
+            Expression::Cast { expr, data_type, shorthand } => {
+                if *shorthand {
+                    // Use Snowflake's :: cast syntax
+                    self.format_expression(expr);
+                    self.printer.write("::");
+                    self.format_data_type(data_type);
+                } else {
+                    // Use standard CAST(expr AS type) syntax
+                    self.printer.write("cast(");
+                    self.format_expression(expr);
+                    self.printer.write(" as ");
+                    self.format_data_type(data_type);
+                    self.printer.write(")");
+                }
             }
             Expression::Extract { field, expr } => {
                 self.printer.write("extract(");
@@ -1372,6 +1380,7 @@ impl Formatter {
             }
             Expression::SemiStructuredAccess { expr, path } => {
                 self.format_expression(expr);
+                self.printer.write(":");
                 self.printer.write(path);
             }
             Expression::ArrayAccess { expr, index } => {
@@ -1551,7 +1560,8 @@ impl Formatter {
     fn format_data_type(&mut self, dt: &DataType) {
         let s = match dt {
             DataType::Boolean => "boolean".to_string(),
-            DataType::Integer => "int".to_string(),
+            DataType::Int => "int".to_string(),
+            DataType::Integer => "integer".to_string(),
             DataType::BigInt => "bigint".to_string(),
             DataType::Float => "float".to_string(),
             DataType::Double => "double".to_string(),
@@ -1562,10 +1572,23 @@ impl Formatter {
                     _ => "decimal".to_string(),
                 }
             }
+            DataType::Number(p, s) => {
+                match (p, s) {
+                    (Some(p), Some(s)) => format!("number({}, {})", p, s),
+                    (Some(p), None) => format!("number({})", p),
+                    _ => "number".to_string(),
+                }
+            }
             DataType::Varchar(len) => {
                 match len {
                     Some(n) => format!("varchar({})", n),
                     None => "varchar".to_string(),
+                }
+            }
+            DataType::String(len) => {
+                match len {
+                    Some(n) => format!("string({})", n),
+                    None => "string".to_string(),
                 }
             }
             DataType::Char(len) => {

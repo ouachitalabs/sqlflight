@@ -445,13 +445,14 @@ fn parse_postfix_expression(parser: &mut Parser) -> Result<Expression> {
                     });
                 }
             }
-            // Cast: expr::type
+            // Cast: expr::type (Snowflake shorthand syntax)
             Token::DoubleColon => {
                 parser.advance();
                 let data_type = parse_data_type(parser)?;
                 expr = Expression::Cast {
                     expr: Box::new(expr),
                     data_type,
+                    shorthand: true,  // :: syntax
                 };
             }
             // Dot access: expr.field
@@ -684,6 +685,7 @@ fn parse_cast_expression(parser: &mut Parser) -> Result<Expression> {
     Ok(Expression::Cast {
         expr: Box::new(expr),
         data_type,
+        shorthand: false,  // explicit CAST(x AS type) syntax
     })
 }
 
@@ -928,11 +930,12 @@ pub fn parse_data_type(parser: &mut Parser) -> Result<DataType> {
             let upper = name.to_uppercase();
             match upper.as_str() {
                 "BOOLEAN" | "BOOL" => Ok(DataType::Boolean),
-                "INTEGER" | "INT" => Ok(DataType::Integer),
+                "INTEGER" => Ok(DataType::Integer),
+                "INT" => Ok(DataType::Int),
                 "BIGINT" => Ok(DataType::BigInt),
                 "FLOAT" | "REAL" => Ok(DataType::Float),
                 "DOUBLE" => Ok(DataType::Double),
-                "DECIMAL" | "NUMBER" | "NUMERIC" => {
+                "DECIMAL" | "NUMERIC" => {
                     if parser.consume(&Token::LParen) {
                         let precision = if let Token::IntegerLiteral(n) = parser.current().clone() {
                             parser.advance();
@@ -956,7 +959,31 @@ pub fn parse_data_type(parser: &mut Parser) -> Result<DataType> {
                         Ok(DataType::Decimal(None, None))
                     }
                 }
-                "VARCHAR" | "STRING" | "TEXT" => {
+                "NUMBER" => {
+                    if parser.consume(&Token::LParen) {
+                        let precision = if let Token::IntegerLiteral(n) = parser.current().clone() {
+                            parser.advance();
+                            Some(n as u8)
+                        } else {
+                            None
+                        };
+                        let scale = if parser.consume(&Token::Comma) {
+                            if let Token::IntegerLiteral(n) = parser.current().clone() {
+                                parser.advance();
+                                Some(n as u8)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        parser.expect(&Token::RParen)?;
+                        Ok(DataType::Number(precision, scale))
+                    } else {
+                        Ok(DataType::Number(None, None))
+                    }
+                }
+                "VARCHAR" => {
                     if parser.consume(&Token::LParen) {
                         let len = if let Token::IntegerLiteral(n) = parser.current().clone() {
                             parser.advance();
@@ -970,6 +997,21 @@ pub fn parse_data_type(parser: &mut Parser) -> Result<DataType> {
                         Ok(DataType::Varchar(None))
                     }
                 }
+                "STRING" => {
+                    if parser.consume(&Token::LParen) {
+                        let len = if let Token::IntegerLiteral(n) = parser.current().clone() {
+                            parser.advance();
+                            Some(n as u32)
+                        } else {
+                            None
+                        };
+                        parser.expect(&Token::RParen)?;
+                        Ok(DataType::String(len))
+                    } else {
+                        Ok(DataType::String(None))
+                    }
+                }
+                "TEXT" => Ok(DataType::Text),
                 "CHAR" => {
                     if parser.consume(&Token::LParen) {
                         let len = if let Token::IntegerLiteral(n) = parser.current().clone() {

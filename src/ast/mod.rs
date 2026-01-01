@@ -234,6 +234,7 @@ pub enum Expression {
     Cast {
         expr: Box<Expression>,
         data_type: DataType,
+        shorthand: bool,  // true for :: syntax, false for CAST(x AS type)
     },
     Extract {
         field: String,
@@ -350,14 +351,17 @@ pub enum WindowFrameBound {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
     Boolean,
-    Integer,
+    Int,                              // INT synonym
+    Integer,                          // INTEGER synonym
     BigInt,
     Float,
     Double,
     Decimal(Option<u8>, Option<u8>),
+    Number(Option<u8>, Option<u8>),   // Snowflake's preferred numeric type
     Varchar(Option<u32>),
+    String(Option<u32>),              // STRING synonym for VARCHAR
+    Text,                             // TEXT synonym for VARCHAR
     Char(Option<u32>),
-    Text,
     Date,
     Time,
     Timestamp,
