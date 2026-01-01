@@ -311,6 +311,13 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         return Ok(TableReference::Lateral(Box::new(inner)));
     }
 
+    // Handle stage reference (@stage_name, @stage_name/path, @~, @%table_name)
+    if parser.consume(&Token::AtSign) {
+        let (name, path) = parse_stage_path(parser)?;
+        let alias = parse_optional_alias(parser);
+        return Ok(TableReference::Stage { name, path, alias });
+    }
+
     // Handle TABLE(function_call) - Snowflake table function syntax
     if parser.check(&Token::Table) {
         let pos = parser.position();
@@ -1710,6 +1717,72 @@ fn keyword_to_identifier(token: &Token) -> Option<String> {
         Token::Current => Some("current".to_string()),
         _ => None,
     }
+}
+
+/// Parse stage path after @
+/// Returns (stage_name, optional_path)
+/// Examples:
+///   @stage_name -> ("stage_name", None)
+///   @stage_name/path/to/file -> ("stage_name", Some("/path/to/file"))
+///   @~ -> ("~", None)
+///   @~/path -> ("~", Some("/path"))
+///   @%table_name -> ("%table_name", None)
+fn parse_stage_path(parser: &mut Parser) -> Result<(String, Option<String>)> {
+    // Handle special prefixes: ~ for user stage, % for table stage
+    let name = if let Token::Identifier(s) = parser.current().clone() {
+        parser.advance();
+        s
+    } else if parser.consume(&Token::Percent) {
+        // Table stage: @%table_name
+        if let Token::Identifier(table_name) = parser.current().clone() {
+            parser.advance();
+            format!("%{}", table_name)
+        } else {
+            return Err(parser.error("Expected table name after @%"));
+        }
+    } else {
+        // Could be ~ for user stage or some other identifier
+        return Err(parser.error(&format!("Expected stage name after @, found {:?}", parser.current())));
+    };
+
+    // Check for path: /path/to/file
+    if parser.check(&Token::Slash) {
+        let mut path = String::new();
+        while parser.consume(&Token::Slash) {
+            path.push('/');
+            // First part of segment: identifier
+            if let Token::Identifier(s) = parser.current().clone() {
+                path.push_str(&s);
+                parser.advance();
+            } else if matches!(parser.current(), Token::Star) {
+                path.push('*');
+                parser.advance();
+            }
+            // Continue with dots and extensions (e.g., .csv, .parquet)
+            while parser.check(&Token::Dot) {
+                parser.advance();
+                path.push('.');
+                match parser.current().clone() {
+                    Token::Identifier(s) => {
+                        path.push_str(&s);
+                        parser.advance();
+                    }
+                    Token::Star => {
+                        path.push('*');
+                        parser.advance();
+                    }
+                    Token::IntegerLiteral(n) => {
+                        path.push_str(&n.to_string());
+                        parser.advance();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return Ok((name, Some(path)));
+    }
+
+    Ok((name, None))
 }
 
 #[cfg(test)]

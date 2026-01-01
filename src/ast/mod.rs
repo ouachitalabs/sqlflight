@@ -95,6 +95,12 @@ pub enum TableReference {
         alias: Option<String>,  // Optional alias (e.g., FLATTEN(...) f)
     },
     Values(ValuesClause),
+    /// Stage reference (e.g., @stage_name, @stage_name/path, @~, @%table_name)
+    Stage {
+        name: String,        // Stage name (including ~ or %table_name if present)
+        path: Option<String>, // Optional path after stage name
+        alias: Option<String>,
+    },
 }
 
 /// JOIN clause

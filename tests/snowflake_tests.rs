@@ -1102,3 +1102,48 @@ mod snowflake_idempotency {
         );
     }
 }
+
+// =============================================================================
+// STAGE REFERENCE TESTS - Snowflake stage (@) syntax
+// =============================================================================
+
+mod stage_references {
+    use super::*;
+
+    #[test]
+    fn simple_stage() {
+        assert_formats_to(
+            "SELECT * FROM @my_stage",
+            "select * from @my_stage",
+        );
+    }
+
+    #[test]
+    fn stage_with_path() {
+        assert_formats_to(
+            "SELECT * FROM @my_stage/path/to/files/",
+            "select * from @my_stage/path/to/files/",
+        );
+    }
+
+    #[test]
+    fn stage_with_alias() {
+        assert_formats_to(
+            "SELECT s.* FROM @my_stage/data s",
+            "select s.* from @my_stage/data s",
+        );
+    }
+
+    #[test]
+    fn table_stage() {
+        assert_formats_to(
+            "SELECT * FROM @%my_table",
+            "select * from @%my_table",
+        );
+    }
+
+    #[test]
+    fn stage_idempotent() {
+        assert_idempotent("SELECT * FROM @my_stage/path/to/data");
+    }
+}

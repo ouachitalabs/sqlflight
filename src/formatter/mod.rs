@@ -843,6 +843,9 @@ impl Formatter {
             TableReference::Lateral(_) => 30,
             TableReference::TableFunction { name, .. } => name.len() + 20,
             TableReference::Values(_) => 30,
+            TableReference::Stage { name, path, alias } => {
+                1 + name.len() + path.as_ref().map_or(0, |p| p.len()) + alias.as_ref().map_or(0, |a| a.len() + 1)
+            }
         };
         6 + table_width // " from " = 6
     }
@@ -1002,6 +1005,17 @@ impl Formatter {
             }
             TableReference::Values(values) => {
                 self.format_values(values);
+            }
+            TableReference::Stage { name, path, alias } => {
+                self.printer.write("@");
+                self.printer.write(name);
+                if let Some(p) = path {
+                    self.printer.write(p);
+                }
+                if let Some(a) = alias {
+                    self.printer.write(" ");
+                    self.printer.write(&format_identifier(a));
+                }
             }
         }
     }
