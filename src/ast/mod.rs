@@ -207,6 +207,7 @@ pub enum SetOperationType {
     Union,
     Intersect,
     Except,
+    Minus, // Snowflake alias for EXCEPT
 }
 
 /// Expression node

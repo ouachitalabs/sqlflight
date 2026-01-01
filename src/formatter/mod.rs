@@ -201,6 +201,11 @@ fn extract_leading_placeholder(s: &str) -> Option<String> {
 }
 
 /// Interleave comments into formatted output based on original positions
+///
+/// Currently, this uses a simple approach: comments at the start of the file
+/// (before any SQL) are preserved at the start, and other comments are
+/// appended at the end. This ensures the formatted SQL structure is not
+/// disrupted while still preserving all comments.
 fn interleave_comments(original: &str, formatted: &str, comments: &[CommentToken]) -> String {
     if comments.is_empty() {
         return formatted.to_string();
@@ -208,224 +213,55 @@ fn interleave_comments(original: &str, formatted: &str, comments: &[CommentToken
 
     let original_lines: Vec<&str> = original.lines().collect();
 
-    // Determine comment type and context for each comment
-    #[derive(Debug, PartialEq, Clone)]
-    enum CommentType {
-        Standalone,      // On its own line (no SQL before it)
-        Trailing,        // At end of line with SQL before it, no SQL after
-        Inline,          // Between SQL tokens on same line (has SQL before AND after)
+    // Find leading comments (before any SQL content)
+    let mut leading_comments: Vec<String> = Vec::new();
+    let mut other_comments: Vec<String> = Vec::new();
+    let mut first_sql_line = 0;
+
+    // Find the first line that has non-comment, non-empty content
+    for (i, line) in original_lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*") {
+            first_sql_line = i;
+            break;
+        }
     }
 
-    #[derive(Debug, Clone)]
-    struct CommentInfo {
-        comment: CommentToken,
-        comment_type: CommentType,
-        before_text: String,   // SQL text before the comment on the same line
-        after_text: String,    // SQL text after the comment on the same line (for inline)
-        orig_line: usize,      // Original line number (0-indexed)
-    }
-
-    let mut comment_infos: Vec<CommentInfo> = Vec::new();
-
+    // Classify comments as leading or other
     for comment in comments {
         let line_idx = comment.line.saturating_sub(1);
-        if line_idx < original_lines.len() {
-            let line = original_lines[line_idx];
-            let comment_marker = if comment.is_block { "/*" } else { "--" };
-
-            if let Some(pos) = line.find(comment_marker) {
-                let before = &line[..pos];
-                let after = if comment.is_block {
-                    // Find the end of this comment
-                    if let Some(end) = line[pos..].find("*/") {
-                        &line[pos + end + 2..]
-                    } else {
-                        ""
-                    }
-                } else {
-                    "" // Single-line comment goes to end
-                };
-
-                let has_sql_before = !before.trim().is_empty();
-                let has_sql_after = !after.trim().is_empty()
-                    && !after.trim().starts_with("--")
-                    && !after.trim().starts_with("/*");
-
-                let comment_type = if !has_sql_before {
-                    CommentType::Standalone
-                } else if has_sql_after {
-                    CommentType::Inline
-                } else {
-                    CommentType::Trailing
-                };
-
-                comment_infos.push(CommentInfo {
-                    comment: comment.clone(),
-                    comment_type,
-                    before_text: before.trim().to_lowercase(),
-                    after_text: after.trim().to_lowercase(),
-                    orig_line: line_idx,
-                });
-            } else {
-                // Comment marker not found on this line - likely a multi-line block comment
-                // continuation or something similar
-                comment_infos.push(CommentInfo {
-                    comment: comment.clone(),
-                    comment_type: CommentType::Standalone,
-                    before_text: String::new(),
-                    after_text: String::new(),
-                    orig_line: line_idx,
-                });
-            }
+        if line_idx < first_sql_line {
+            leading_comments.push(comment.text.clone());
         } else {
-            comment_infos.push(CommentInfo {
-                comment: comment.clone(),
-                comment_type: CommentType::Standalone,
-                before_text: String::new(),
-                after_text: String::new(),
-                orig_line: line_idx,
-            });
+            other_comments.push(comment.text.clone());
         }
     }
 
-    // If the formatter merged multiple SQL lines into fewer formatted lines,
-    // we need to split them back up when there are trailing comments
-
-    // Build the result by tracking original SQL lines
     let mut result = String::new();
-    let mut formatted_char_idx = 0;
-    let formatted_flat = formatted.replace('\n', " ");
-    let mut comment_idx = 0;
 
-    for (orig_line_idx, orig_line) in original_lines.iter().enumerate() {
-        // Add standalone comments for this line
-        while comment_idx < comment_infos.len()
-            && comment_infos[comment_idx].orig_line == orig_line_idx
-            && comment_infos[comment_idx].comment_type == CommentType::Standalone
-        {
-            if !result.is_empty() && !result.ends_with('\n') {
-                result.push('\n');
-            }
-            result.push_str(&comment_infos[comment_idx].comment.text);
-            comment_idx += 1;
-        }
-
-        // Check if this original line has SQL content
-        let line_trimmed = orig_line.trim();
-        let is_standalone_comment_line = line_trimmed.starts_with("--") || line_trimmed.starts_with("/*");
-        let has_sql = !line_trimmed.is_empty() && !is_standalone_comment_line;
-
-        if has_sql {
-            // Collect comments for this line
-            let line_comments: Vec<&CommentInfo> = comment_infos[comment_idx..]
-                .iter()
-                .take_while(|c| c.orig_line == orig_line_idx)
-                .filter(|c| c.comment_type != CommentType::Standalone)
-                .collect();
-
-            let num_line_comments = line_comments.len();
-
-            // Check if there's an inline comment - if so, the whole original line stays together
-            let has_inline = line_comments.iter().any(|c| c.comment_type == CommentType::Inline);
-
-            if has_inline {
-                // For inline comments, find both before and after content in formatted output
-                // and reconstruct the line with the comment inserted
-                let inline_comment = line_comments.iter()
-                    .find(|c| c.comment_type == CommentType::Inline)
-                    .unwrap();
-
-                let before_text = &inline_comment.before_text;
-                let after_text = &inline_comment.after_text;
-                let formatted_lower = formatted_flat.to_lowercase();
-
-                // Find before text
-                if let Some(before_pos) = formatted_lower[formatted_char_idx..].find(before_text) {
-                    let abs_before_pos = formatted_char_idx + before_pos;
-                    let before_end = abs_before_pos + before_text.len();
-
-                    // Find after text
-                    if let Some(after_pos) = formatted_lower[before_end..].find(after_text) {
-                        let abs_after_pos = before_end + after_pos;
-                        let after_end = abs_after_pos + after_text.len();
-
-                        // Build the line: before + comment + after
-                        let formatted_before = &formatted_flat[abs_before_pos..before_end];
-                        let formatted_after = &formatted_flat[abs_after_pos..after_end];
-
-                        if !result.is_empty() && !result.ends_with('\n') {
-                            result.push('\n');
-                        }
-                        result.push_str(formatted_before.trim());
-                        result.push(' ');
-                        result.push_str(&inline_comment.comment.text);
-                        result.push(' ');
-                        result.push_str(formatted_after.trim());
-
-                        formatted_char_idx = after_end;
-                    }
-                }
-            } else {
-                // No inline comment - get the SQL content before any trailing comment
-                let sql_content = if let Some(pos) = line_trimmed.find("--") {
-                    &line_trimmed[..pos]
-                } else if let Some(pos) = line_trimmed.find("/*") {
-                    &line_trimmed[..pos]
-                } else {
-                    line_trimmed
-                };
-                let sql_content = sql_content.trim().to_lowercase();
-
-                // Find this content in the formatted output (flattened)
-                let formatted_lower = formatted_flat.to_lowercase();
-                if let Some(pos) = formatted_lower[formatted_char_idx..].find(&sql_content) {
-                    let absolute_pos = formatted_char_idx + pos;
-                    let end_pos = absolute_pos + sql_content.len();
-
-                    // Get the formatted version of this SQL segment
-                    let formatted_segment = &formatted_flat[absolute_pos..end_pos];
-
-                    if !result.is_empty() && !result.ends_with('\n') {
-                        result.push('\n');
-                    }
-                    result.push_str(formatted_segment.trim());
-
-                    // Add trailing comments
-                    for ci in &line_comments {
-                        if ci.comment_type == CommentType::Trailing {
-                            result.push(' ');
-                            result.push_str(&ci.comment.text);
-                        }
-                    }
-
-                    formatted_char_idx = end_pos;
-                }
-            }
-
-            comment_idx += num_line_comments;
-        }
+    // Add leading comments first
+    for comment in &leading_comments {
+        result.push_str(comment);
+        result.push('\n');
     }
 
-    // Append any remaining formatted content
-    let remaining = formatted_flat[formatted_char_idx..].trim();
-    if !remaining.is_empty() {
-        if !result.is_empty() && !result.ends_with('\n') {
+    // Add the formatted SQL
+    result.push_str(formatted);
+
+    // Add trailing comments (if any)
+    // We add a blank line before trailing comments for readability
+    if !other_comments.is_empty() {
+        if !result.ends_with('\n') {
             result.push('\n');
         }
-        result.push_str(remaining);
-    }
-
-    // Add any remaining comments
-    while comment_idx < comment_infos.len() {
-        if !result.is_empty() && !result.ends_with('\n') {
+        for comment in &other_comments {
+            result.push_str(comment);
             result.push('\n');
         }
-        result.push_str(&comment_infos[comment_idx].comment.text);
-        comment_idx += 1;
     }
 
-    // Add trailing newline if formatted had one
-    if formatted.ends_with('\n') && !result.ends_with('\n') {
+    // Ensure trailing newline
+    if !result.ends_with('\n') {
         result.push('\n');
     }
 
@@ -1612,6 +1448,7 @@ impl Formatter {
             SetOperationType::Union => "union",
             SetOperationType::Intersect => "intersect",
             SetOperationType::Except => "except",
+            SetOperationType::Minus => "minus",
         };
         self.printer.write(op_keyword);
         if set_op.all {

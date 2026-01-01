@@ -43,6 +43,7 @@ pub enum Token {
     Union,
     Intersect,
     Except,
+    MinusSet, // MINUS as set operator (alias for EXCEPT in Snowflake)
     All,
     Distinct,
     Recursive,
@@ -612,6 +613,7 @@ fn parse_keyword_or_identifier<'s>(input: &mut &'s str) -> ModalResult<Token> {
         "UNION" => Token::Union,
         "INTERSECT" => Token::Intersect,
         "EXCEPT" => Token::Except,
+        "MINUS" => Token::MinusSet,
         "ALL" => Token::All,
         "DISTINCT" => Token::Distinct,
         "RECURSIVE" => Token::Recursive,

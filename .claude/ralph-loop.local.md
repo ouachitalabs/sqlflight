@@ -1,9 +1,9 @@
 ---
 active: true
-iteration: 2
+iteration: 1
 max_iterations: 0
-completion_promise: "PARSER_FINISHED"
-started_at: "2026-01-01T15:12:24Z"
+completion_promise: "FORMATTED_SUCCESSFULLY"
+started_at: "2026-01-01T20:33:52Z"
 ---
 
-attempt to format test_fixtures/comprehensive_nasty.sql until all parser bugs are fixed. Add test coverage for each bug you find. Commit after every complete tested fix.
+attempt to format test_fixtures/comprehensive_nasty.sql and fix any bugs you see.

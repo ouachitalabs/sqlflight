@@ -332,6 +332,7 @@ fn is_keyword_that_ends_column(token: &Token) -> bool {
             | Token::Union
             | Token::Intersect
             | Token::Except
+            | Token::MinusSet
             | Token::Join
             | Token::Inner
             | Token::Left
@@ -1283,6 +1284,8 @@ fn parse_set_operation(parser: &mut Parser) -> Result<Option<Box<SetOperation>>>
         Some(SetOperationType::Intersect)
     } else if parser.consume(&Token::Except) {
         Some(SetOperationType::Except)
+    } else if parser.consume(&Token::MinusSet) {
+        Some(SetOperationType::Minus)
     } else {
         None
     };
@@ -1292,8 +1295,21 @@ fn parse_set_operation(parser: &mut Parser) -> Result<Option<Box<SetOperation>>>
         // The right side can be a SELECT statement or a parenthesized query
         let query = if parser.check(&Token::LParen) {
             parser.advance();
-            let inner = parse_select_statement(parser)?;
+            let mut inner = parse_select_statement(parser)?;
             parser.expect(&Token::RParen)?;
+            // After a parenthesized query, check if there are more set operations
+            // These should chain at the end of the inner query's set operation chain
+            if let Some(next_set_op) = parse_set_operation(parser)? {
+                // Find the end of the set operation chain and append there
+                fn append_set_op(stmt: &mut SelectStatement, op: Box<SetOperation>) {
+                    if let Some(ref mut existing) = stmt.union {
+                        append_set_op(&mut existing.query, op);
+                    } else {
+                        stmt.union = Some(op);
+                    }
+                }
+                append_set_op(&mut inner, next_set_op);
+            }
             inner
         } else {
             parse_select_statement(parser)?
