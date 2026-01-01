@@ -444,6 +444,17 @@ from warehouse_data
 sample block (10)",
         );
     }
+
+    #[test]
+    fn sample_with_repeatable() {
+        // REPEATABLE is a synonym for SEED
+        assert_formats_to(
+            "SELECT * FROM data SAMPLE SYSTEM (10) REPEATABLE (42)",
+            "select *
+from data
+sample system (10) seed (42)",
+        );
+    }
 }
 
 // =============================================================================
@@ -1117,6 +1128,25 @@ from my_table changes (information => default) at (timestamp => '2024-01-01'::ti
             "SELECT * FROM my_table CHANGES(INFORMATION=>APPEND_ONLY) AT(OFFSET=>-86400) END(OFFSET=>0)",
             "select *
 from my_table changes (information => append_only) at (offset => -86400) end (offset => 0)",
+        );
+    }
+
+    #[test]
+    fn connect_by_basic() {
+        assert_formats_to(
+            "SELECT id, name, LEVEL FROM employees START WITH manager_id IS NULL CONNECT BY PRIOR id = manager_id",
+            "select id, name, level from employees
+start with manager_id is null
+connect by prior(id) = manager_id",
+        );
+    }
+
+    #[test]
+    fn connect_by_root() {
+        assert_formats_to(
+            "SELECT id, CONNECT_BY_ROOT name AS root_name FROM employees CONNECT BY PRIOR id = manager_id",
+            "select id, connect_by_root(name) as root_name from employees
+connect by prior(id) = manager_id",
         );
     }
 }

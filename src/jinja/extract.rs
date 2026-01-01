@@ -70,6 +70,10 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                     chars.next(); // consume second {
                     let content = extract_until(&mut chars, "}}")?;
                     let placeholder = create_placeholder(&mut counter, content, JinjaKind::Expression);
+                    // Add space if previous char was alphanumeric to prevent merging
+                    if result.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+                        result.push(' ');
+                    }
                     result.push_str(&placeholder.id);
                     placeholders.insert(placeholder.id.clone(), placeholder);
                 }
@@ -107,6 +111,10 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                             original: full_original,
                             kind: JinjaKind::Statement,
                         };
+                        // Add space if previous char was alphanumeric to prevent merging
+                        if result.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+                            result.push(' ');
+                        }
                         result.push_str(&placeholder.id);
                         placeholders.insert(placeholder.id.clone(), placeholder);
                     } else {
@@ -116,6 +124,10 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                             starts_with_trim,
                             stmt.ends_with_trim,
                         );
+                        // Add space if previous char was alphanumeric to prevent merging
+                        if result.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+                            result.push(' ');
+                        }
                         result.push_str(&placeholder.id);
                         placeholders.insert(placeholder.id.clone(), placeholder);
                     }
@@ -125,6 +137,10 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                     chars.next(); // consume #
                     let content = extract_until(&mut chars, "#}")?;
                     let placeholder = create_placeholder(&mut counter, content, JinjaKind::Comment);
+                    // Add space if previous char was alphanumeric to prevent merging
+                    if result.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+                        result.push(' ');
+                    }
                     result.push_str(&placeholder.id);
                     placeholders.insert(placeholder.id.clone(), placeholder);
                 }

@@ -115,6 +115,7 @@ pub enum Token {
     System,
     Block,
     Seed,
+    Repeatable,
     MatchRecognize,
     Measures,
     Define,
@@ -125,6 +126,10 @@ pub enum Token {
     Past,
     One,
     Per,
+    Start,
+    Connect,
+    Prior,
+    Siblings,
 
     // Additional keywords
     Default,
@@ -680,6 +685,7 @@ fn parse_keyword_or_identifier<'s>(input: &mut &'s str) -> ModalResult<Token> {
         "SYSTEM" => Token::System,
         "BLOCK" => Token::Block,
         "SEED" => Token::Seed,
+        "REPEATABLE" => Token::Repeatable,
         "MATCH_RECOGNIZE" => Token::MatchRecognize,
         "MEASURES" => Token::Measures,
         "DEFINE" => Token::Define,
@@ -690,6 +696,10 @@ fn parse_keyword_or_identifier<'s>(input: &mut &'s str) -> ModalResult<Token> {
         "PAST" => Token::Past,
         "ONE" => Token::One,
         "PER" => Token::Per,
+        "START" => Token::Start,
+        "CONNECT" => Token::Connect,
+        "PRIOR" => Token::Prior,
+        "SIBLINGS" => Token::Siblings,
         _ => Token::Identifier(ident),
     };
 

@@ -29,6 +29,7 @@ pub struct SelectStatement {
     pub pivot: Option<PivotClause>,
     pub unpivot: Option<UnpivotClause>,
     pub where_clause: Option<WhereClause>,
+    pub connect_by: Option<ConnectByClause>,
     pub group_by: Option<GroupByClause>,
     pub having: Option<HavingClause>,
     pub qualify: Option<QualifyClause>,
@@ -181,6 +182,15 @@ pub enum NullsOrder {
 pub struct LimitClause {
     pub count: Expression,
     pub offset: Option<Expression>,
+}
+
+/// CONNECT BY clause (hierarchical query)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectByClause {
+    pub start_with: Option<Expression>,
+    pub connect_by: Expression,
+    pub nocycle: bool,
+    pub order_siblings_by: Option<Vec<OrderByItem>>,
 }
 
 /// Set operations (UNION, INTERSECT, EXCEPT)

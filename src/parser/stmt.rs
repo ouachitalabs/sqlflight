@@ -191,6 +191,9 @@ pub fn parse_select_statement(parser: &mut Parser) -> Result<SelectStatement> {
         None
     };
 
+    // CONNECT BY clause (hierarchical query)
+    let connect_by = parse_connect_by_clause(parser)?;
+
     // GROUP BY clause
     let group_by = if parser.consume(&Token::Group) {
         parser.expect(&Token::By)?;
@@ -270,6 +273,7 @@ pub fn parse_select_statement(parser: &mut Parser) -> Result<SelectStatement> {
         pivot,
         unpivot,
         where_clause,
+        connect_by,
         group_by,
         having,
         qualify,
@@ -701,8 +705,8 @@ fn parse_sample_clause(parser: &mut Parser) -> Result<Option<SampleClause>> {
 
     parser.expect(&Token::RParen)?;
 
-    // Parse optional SEED clause
-    let seed = if parser.consume(&Token::Seed) {
+    // Parse optional SEED or REPEATABLE clause
+    let seed = if parser.consume(&Token::Seed) || parser.consume(&Token::Repeatable) {
         parser.expect(&Token::LParen)?;
         let seed_val = if let Token::IntegerLiteral(n) = parser.current().clone() {
             parser.advance();
@@ -720,6 +724,81 @@ fn parse_sample_clause(parser: &mut Parser) -> Result<Option<SampleClause>> {
     };
 
     Ok(Some(SampleClause { method, size, seed, tablesample }))
+}
+
+/// Parse optional CONNECT BY clause (hierarchical query)
+/// START WITH condition CONNECT BY [NOCYCLE] condition [ORDER SIBLINGS BY ...]
+/// or: CONNECT BY [NOCYCLE] condition [START WITH condition] [ORDER SIBLINGS BY ...]
+fn parse_connect_by_clause(parser: &mut Parser) -> Result<Option<ConnectByClause>> {
+    use crate::ast::ConnectByClause;
+
+    // Try START WITH first
+    let mut start_with = None;
+    if parser.check(&Token::Start) {
+        let pos = parser.position();
+        parser.advance();
+        if parser.consume(&Token::With) {
+            start_with = Some(parse_expression(parser)?);
+        } else {
+            // Not START WITH, restore and continue
+            parser.restore(pos);
+        }
+    }
+
+    // CONNECT BY
+    if !parser.consume(&Token::Connect) {
+        // If we parsed START WITH but no CONNECT BY, that's an error
+        if start_with.is_some() {
+            return Err(crate::Error::ParseError {
+                message: "START WITH requires CONNECT BY".to_string(),
+                span: None,
+            });
+        }
+        return Ok(None);
+    }
+    parser.expect(&Token::By)?;
+
+    // Optional NOCYCLE
+    let nocycle = if let Token::Identifier(name) = parser.current().clone() {
+        if name.eq_ignore_ascii_case("nocycle") {
+            parser.advance();
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // CONNECT BY condition
+    let connect_by_expr = parse_expression(parser)?;
+
+    // Optional START WITH after CONNECT BY (if not already parsed)
+    if start_with.is_none() && parser.check(&Token::Start) {
+        let pos = parser.position();
+        parser.advance();
+        if parser.consume(&Token::With) {
+            start_with = Some(parse_expression(parser)?);
+        } else {
+            parser.restore(pos);
+        }
+    }
+
+    // Optional ORDER SIBLINGS BY
+    let order_siblings_by = if parser.consume(&Token::Order) {
+        parser.expect(&Token::Siblings)?;
+        parser.expect(&Token::By)?;
+        Some(parse_order_by_items(parser)?)
+    } else {
+        None
+    };
+
+    Ok(Some(ConnectByClause {
+        start_with,
+        connect_by: connect_by_expr,
+        nocycle,
+        order_siblings_by,
+    }))
 }
 
 /// Parse optional PIVOT clause

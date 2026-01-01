@@ -621,6 +621,12 @@ impl Formatter {
             }
         }
 
+        // CONNECT BY (hierarchical query)
+        if let Some(connect_by) = &stmt.connect_by {
+            self.printer.newline();
+            self.format_connect_by(connect_by);
+        }
+
         // GROUP BY
         if let Some(group_by) = &stmt.group_by {
             self.printer.newline();
@@ -1467,6 +1473,41 @@ impl Formatter {
                 } else {
                     // This shouldn't happen if we're correctly walking the tree
                     parts.push(("", expr));
+                }
+            }
+        }
+    }
+
+    fn format_connect_by(&mut self, connect_by: &ConnectByClause) {
+        // START WITH comes first if present
+        if let Some(start_with) = &connect_by.start_with {
+            self.printer.write("start with ");
+            self.format_expression(start_with);
+            self.printer.newline();
+        }
+
+        // CONNECT BY
+        self.printer.write("connect by");
+        if connect_by.nocycle {
+            self.printer.write(" nocycle");
+        }
+        self.printer.write(" ");
+        self.format_expression(&connect_by.connect_by);
+
+        // ORDER SIBLINGS BY
+        if let Some(order_siblings_by) = &connect_by.order_siblings_by {
+            self.printer.newline();
+            self.printer.write("order siblings by ");
+            for (i, item) in order_siblings_by.iter().enumerate() {
+                if i > 0 {
+                    self.printer.write(", ");
+                }
+                self.format_expression(&item.expr);
+                if let Some(dir) = &item.direction {
+                    self.printer.write(match dir {
+                        SortDirection::Asc => " asc",
+                        SortDirection::Desc => " desc",
+                    });
                 }
             }
         }
