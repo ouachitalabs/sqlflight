@@ -1028,9 +1028,27 @@ fn parse_window_frame_bound(parser: &mut Parser) -> Result<WindowFrameBound> {
 
     if parser.consume(&Token::Unbounded) {
         if parser.consume(&Token::Preceding) {
-            return Ok(WindowFrameBound::Preceding(None));
+            return Ok(WindowFrameBound::UnboundedPreceding);
         } else if parser.consume(&Token::Following) {
-            return Ok(WindowFrameBound::Following(None));
+            return Ok(WindowFrameBound::UnboundedFollowing);
+        }
+    }
+
+    // Check for INTERVAL bound (e.g., INTERVAL '1 hour' PRECEDING)
+    if parser.consume(&Token::Interval) {
+        if let Token::StringLiteral(value) = parser.current().clone() {
+            parser.advance();
+            if parser.consume(&Token::Preceding) {
+                return Ok(WindowFrameBound::Preceding(FrameBoundValue::Interval {
+                    value,
+                    unit: String::new(),
+                }));
+            } else if parser.consume(&Token::Following) {
+                return Ok(WindowFrameBound::Following(FrameBoundValue::Interval {
+                    value,
+                    unit: String::new(),
+                }));
+            }
         }
     }
 
@@ -1038,9 +1056,9 @@ fn parse_window_frame_bound(parser: &mut Parser) -> Result<WindowFrameBound> {
     if let Token::IntegerLiteral(n) = parser.current().clone() {
         parser.advance();
         if parser.consume(&Token::Preceding) {
-            return Ok(WindowFrameBound::Preceding(Some(n as u64)));
+            return Ok(WindowFrameBound::Preceding(FrameBoundValue::Numeric(n as u64)));
         } else if parser.consume(&Token::Following) {
-            return Ok(WindowFrameBound::Following(Some(n as u64)));
+            return Ok(WindowFrameBound::Following(FrameBoundValue::Numeric(n as u64)));
         }
     }
 

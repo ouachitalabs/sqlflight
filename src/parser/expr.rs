@@ -609,17 +609,19 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
             }
         }
 
-        // TIMESTAMP literal
+        // TIMESTAMP - can be either a timestamp literal (TIMESTAMP 'yyyy-mm-dd...') or an identifier
         Token::Timestamp => {
+            let pos = parser.position();
             parser.advance();
             if let Token::StringLiteral(s) = parser.current().clone() {
+                // TIMESTAMP followed by string literal is a timestamp literal
                 parser.advance();
                 Ok(Expression::Literal(Literal::Timestamp(s)))
             } else {
-                Err(crate::Error::ParseError {
-                    message: "Expected string after TIMESTAMP".to_string(),
-                    span: None,
-                })
+                // TIMESTAMP followed by anything else - treat as identifier
+                parser.restore(pos);
+                parser.advance(); // consume TIMESTAMP token
+                Ok(Expression::Identifier("timestamp".to_string()))
             }
         }
 
@@ -857,9 +859,29 @@ fn parse_window_frame_bound(parser: &mut Parser) -> Result<WindowFrameBound> {
 
     if parser.consume(&Token::Unbounded) {
         if parser.consume(&Token::Preceding) {
-            return Ok(WindowFrameBound::Preceding(None));
+            return Ok(WindowFrameBound::UnboundedPreceding);
         } else if parser.consume(&Token::Following) {
-            return Ok(WindowFrameBound::Following(None));
+            return Ok(WindowFrameBound::UnboundedFollowing);
+        }
+    }
+
+    // Check for INTERVAL bound (e.g., INTERVAL '1 hour' PRECEDING)
+    if parser.consume(&Token::Interval) {
+        if let Token::StringLiteral(value) = parser.current().clone() {
+            parser.advance();
+            // The unit might be inside the string (e.g., '1 hour') or as a separate identifier
+            // Snowflake typically uses INTERVAL 'value unit' syntax
+            if parser.consume(&Token::Preceding) {
+                return Ok(WindowFrameBound::Preceding(FrameBoundValue::Interval {
+                    value,
+                    unit: String::new(),  // Unit is part of the value string
+                }));
+            } else if parser.consume(&Token::Following) {
+                return Ok(WindowFrameBound::Following(FrameBoundValue::Interval {
+                    value,
+                    unit: String::new(),
+                }));
+            }
         }
     }
 
@@ -867,9 +889,9 @@ fn parse_window_frame_bound(parser: &mut Parser) -> Result<WindowFrameBound> {
     if let Token::IntegerLiteral(n) = parser.current().clone() {
         parser.advance();
         if parser.consume(&Token::Preceding) {
-            return Ok(WindowFrameBound::Preceding(Some(n as u64)));
+            return Ok(WindowFrameBound::Preceding(FrameBoundValue::Numeric(n as u64)));
         } else if parser.consume(&Token::Following) {
-            return Ok(WindowFrameBound::Following(Some(n as u64)));
+            return Ok(WindowFrameBound::Following(FrameBoundValue::Numeric(n as u64)));
         }
     }
 

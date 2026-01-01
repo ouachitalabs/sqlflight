@@ -1546,13 +1546,32 @@ impl Formatter {
     fn format_frame_bound(&mut self, bound: &WindowFrameBound) {
         match bound {
             WindowFrameBound::CurrentRow => self.printer.write("current row"),
-            WindowFrameBound::Preceding(None) => self.printer.write("unbounded preceding"),
-            WindowFrameBound::Preceding(Some(n)) => {
-                self.printer.write(&format!("{} preceding", n));
+            WindowFrameBound::UnboundedPreceding => self.printer.write("unbounded preceding"),
+            WindowFrameBound::UnboundedFollowing => self.printer.write("unbounded following"),
+            WindowFrameBound::Preceding(value) => {
+                self.format_frame_bound_value(value);
+                self.printer.write(" preceding");
             }
-            WindowFrameBound::Following(None) => self.printer.write("unbounded following"),
-            WindowFrameBound::Following(Some(n)) => {
-                self.printer.write(&format!("{} following", n));
+            WindowFrameBound::Following(value) => {
+                self.format_frame_bound_value(value);
+                self.printer.write(" following");
+            }
+        }
+    }
+
+    fn format_frame_bound_value(&mut self, value: &FrameBoundValue) {
+        match value {
+            FrameBoundValue::Numeric(n) => {
+                self.printer.write(&n.to_string());
+            }
+            FrameBoundValue::Interval { value, unit } => {
+                self.printer.write("interval '");
+                self.printer.write(value);
+                self.printer.write("'");
+                if !unit.is_empty() {
+                    self.printer.write(" ");
+                    self.printer.write(unit);
+                }
             }
         }
     }

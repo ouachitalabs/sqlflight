@@ -339,12 +339,21 @@ pub enum WindowFrameUnit {
     Groups,
 }
 
+/// Window frame bound value (numeric or interval)
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameBoundValue {
+    Numeric(u64),
+    Interval { value: String, unit: String },
+}
+
 /// Window frame bounds
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowFrameBound {
     CurrentRow,
-    Preceding(Option<u64>),
-    Following(Option<u64>),
+    UnboundedPreceding,
+    UnboundedFollowing,
+    Preceding(FrameBoundValue),
+    Following(FrameBoundValue),
 }
 
 /// Data types

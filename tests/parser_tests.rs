@@ -591,7 +591,7 @@ mod function_calls {
                 let spec = over.as_ref().expect("Expected window spec");
                 let frame = spec.frame.as_ref().expect("Expected window frame");
                 assert_eq!(frame.unit, WindowFrameUnit::Rows);
-                assert_eq!(frame.start, WindowFrameBound::Preceding(None));
+                assert_eq!(frame.start, WindowFrameBound::UnboundedPreceding);
                 assert_eq!(frame.end, Some(WindowFrameBound::CurrentRow));
             }
             _ => panic!("Expected FunctionCall with window frame"),
