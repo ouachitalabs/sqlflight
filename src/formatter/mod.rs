@@ -555,6 +555,11 @@ impl Formatter {
                     | TableReference::Table { match_recognize: Some(_), .. })
             });
 
+        // Check if FROM table has TIME_TRAVEL (AT/BEFORE clause)
+        let has_time_travel = stmt.from.as_ref().map_or(false, |from| {
+            matches!(&from.table, TableReference::Table { time_travel: Some(_), .. })
+        });
+
         // Can only inline if: no other clauses except simple WHERE with named columns
         // Note: UNION doesn't force FROM to newline, each SELECT in UNION formats independently
         let has_extra_clauses = stmt.group_by.is_some()
@@ -584,13 +589,14 @@ impl Formatter {
             && !self.in_subquery;  // Never simple when inside a subquery
 
         // FROM should be on new line if: vertical columns, has star with WHERE/JOINs, has extra clauses,
-        // we're inside a subquery, there's a SAMPLE clause, or there's PIVOT/UNPIVOT
+        // we're inside a subquery, there's a SAMPLE clause, PIVOT/UNPIVOT, or TIME_TRAVEL
         let force_from_newline = !columns_inline
             || (has_star && (stmt.where_clause.is_some() || !stmt.joins.is_empty()))
             || has_extra_clauses
             || has_sample
             || has_table_function
             || has_pivot_unpivot
+            || has_time_travel
             || self.in_subquery;
 
         // FROM clause
@@ -910,8 +916,13 @@ impl Formatter {
 
     fn format_table_reference(&mut self, table: &TableReference) {
         match table {
-            TableReference::Table { name, alias, sample, pivot, unpivot, match_recognize, .. } => {
+            TableReference::Table { name, alias, time_travel, sample, pivot, unpivot, match_recognize, .. } => {
                 self.printer.write(&format_identifier(name));
+                // Format TIME_TRAVEL clause (AT/BEFORE)
+                if let Some(tt) = time_travel {
+                    self.printer.write(" ");
+                    self.format_time_travel(tt);
+                }
                 // Note: alias is printed after PIVOT/UNPIVOT/MATCH_RECOGNIZE if they exist
                 let has_special_clause = pivot.is_some() || unpivot.is_some() || match_recognize.is_some();
                 if !has_special_clause {
@@ -1246,6 +1257,39 @@ impl Formatter {
         self.printer.dedent();
         self.printer.newline();
         self.printer.write(")");
+    }
+
+    fn format_time_travel(&mut self, tt: &TimeTravelClause) {
+        match tt {
+            TimeTravelClause::At(point) => {
+                self.printer.write("at (");
+                self.format_time_travel_point(point);
+                self.printer.write(")");
+            }
+            TimeTravelClause::Before(point) => {
+                self.printer.write("before (");
+                self.format_time_travel_point(point);
+                self.printer.write(")");
+            }
+        }
+    }
+
+    fn format_time_travel_point(&mut self, point: &TimeTravelPoint) {
+        match point {
+            TimeTravelPoint::Timestamp(expr) => {
+                self.printer.write("timestamp => ");
+                self.format_expression(expr);
+            }
+            TimeTravelPoint::Offset(expr) => {
+                self.printer.write("offset => ");
+                self.format_expression(expr);
+            }
+            TimeTravelPoint::Statement(id) => {
+                self.printer.write("statement => '");
+                self.printer.write(id);
+                self.printer.write("'");
+            }
+        }
     }
 
     fn format_values(&mut self, values: &ValuesClause) {

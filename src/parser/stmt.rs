@@ -365,6 +365,9 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     // Table name
     let name = parse_qualified_table_name(parser)?;
 
+    // Parse optional AT/BEFORE time travel clause
+    let time_travel = parse_time_travel_clause(parser)?;
+
     // Optional alias (before SAMPLE/PIVOT)
     let alias = parse_optional_alias(parser);
 
@@ -390,13 +393,63 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     Ok(TableReference::Table {
         name,
         alias,
-        time_travel: None,
+        time_travel,
         changes: None,
         sample,
         pivot,
         unpivot,
         match_recognize,
     })
+}
+
+/// Parse optional AT/BEFORE time travel clause
+fn parse_time_travel_clause(parser: &mut Parser) -> Result<Option<TimeTravelClause>> {
+    // AT (TIMESTAMP => expr | OFFSET => expr | STATEMENT => 'id')
+    // BEFORE (TIMESTAMP => expr | OFFSET => expr | STATEMENT => 'id')
+    let is_at = if parser.consume(&Token::At) {
+        true
+    } else if parser.consume(&Token::Before) {
+        false
+    } else {
+        return Ok(None);
+    };
+
+    parser.expect(&Token::LParen)?;
+
+    // Parse the point specification
+    let point = if parser.consume(&Token::Timestamp) {
+        parser.expect(&Token::FatArrow)?;
+        let expr = parse_expression(parser)?;
+        TimeTravelPoint::Timestamp(expr)
+    } else if parser.consume(&Token::Offset) {
+        parser.expect(&Token::FatArrow)?;
+        let expr = parse_expression(parser)?;
+        TimeTravelPoint::Offset(expr)
+    } else if parser.consume(&Token::Statement) {
+        parser.expect(&Token::FatArrow)?;
+        if let Token::StringLiteral(id) = parser.current().clone() {
+            parser.advance();
+            TimeTravelPoint::Statement(id)
+        } else {
+            return Err(crate::Error::ParseError {
+                message: "Expected string literal for STATEMENT".to_string(),
+                span: None,
+            });
+        }
+    } else {
+        return Err(crate::Error::ParseError {
+            message: "Expected TIMESTAMP, OFFSET, or STATEMENT".to_string(),
+            span: None,
+        });
+    };
+
+    parser.expect(&Token::RParen)?;
+
+    if is_at {
+        Ok(Some(TimeTravelClause::At(point)))
+    } else {
+        Ok(Some(TimeTravelClause::Before(point)))
+    }
 }
 
 /// Parse optional SAMPLE/TABLESAMPLE clause
