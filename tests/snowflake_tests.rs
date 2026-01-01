@@ -1147,3 +1147,40 @@ mod stage_references {
         assert_idempotent("SELECT * FROM @my_stage/path/to/data");
     }
 }
+
+// =============================================================================
+// POSITIONAL COLUMN REFERENCES - $1, $2, etc. for COPY INTO and stage queries
+// =============================================================================
+
+mod positional_columns {
+    use super::*;
+
+    #[test]
+    fn simple_positional() {
+        assert_formats_to(
+            "SELECT $1, $2, $3 FROM @my_stage",
+            "select $1, $2, $3 from @my_stage",
+        );
+    }
+
+    #[test]
+    fn positional_with_alias() {
+        assert_formats_to(
+            "SELECT $1 AS col1, $2 AS col2 FROM @my_stage",
+            "select $1 as col1, $2 as col2 from @my_stage",
+        );
+    }
+
+    #[test]
+    fn positional_in_expression() {
+        assert_formats_to(
+            "SELECT $1 + $2 FROM @my_stage",
+            "select $1 + $2 from @my_stage",
+        );
+    }
+
+    #[test]
+    fn positional_idempotent() {
+        assert_idempotent("SELECT $1, $2, $3 FROM @my_stage/data.csv");
+    }
+}

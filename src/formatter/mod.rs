@@ -1755,6 +1755,9 @@ impl Formatter {
                 self.in_subquery = was_in_subquery;
                 self.printer.write(")");
             }
+            Expression::PositionalColumn(n) => {
+                self.printer.write(&format!("${}", n));
+            }
         }
     }
 

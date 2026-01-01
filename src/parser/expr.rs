@@ -680,6 +680,17 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
             Ok(Expression::Exists { subquery })
         }
 
+        // Positional column reference ($1, $2, etc.)
+        Token::Dollar => {
+            parser.advance();
+            if let Token::IntegerLiteral(n) = parser.current().clone() {
+                parser.advance();
+                Ok(Expression::PositionalColumn(n as u32))
+            } else {
+                Err(parser.error("Expected column number after $"))
+            }
+        }
+
         // Keywords that can be used as function names (LAST, FIRST, MATCH_NUMBER, PREV, etc.)
         Token::Last | Token::First | Token::Match => {
             let name = match parser.current() {

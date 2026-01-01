@@ -161,6 +161,7 @@ pub enum Token {
     RBracket,
     FatArrow, // =>
     AtSign,   // @ for stage references
+    Dollar,   // $ for positional column references
 
     // Jinja
     JinjaExpression(String), // {{ ... }}
@@ -560,6 +561,7 @@ fn parse_single_char_operator<'s>(input: &mut &'s str) -> ModalResult<Token> {
         literal("[").map(|_| Token::LBracket),
         literal("]").map(|_| Token::RBracket),
         literal("@").map(|_| Token::AtSign),
+        literal("$").map(|_| Token::Dollar),
     ))
     .parse_next(input)
 }

@@ -267,6 +267,8 @@ pub enum Expression {
     Exists {
         subquery: Box<SelectStatement>,
     },
+    /// Positional column reference ($1, $2, etc.) used in staged file queries
+    PositionalColumn(u32),
 }
 
 /// Literal values
