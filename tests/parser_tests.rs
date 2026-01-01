@@ -1003,7 +1003,7 @@ mod select_statements {
         let stmt = parse_ok("SELECT u.id FROM users u");
         let select = as_select(&stmt);
         match &select.from.as_ref().unwrap().table {
-            TableReference::Table { name, alias } => {
+            TableReference::Table { name, alias, .. } => {
                 assert_eq!(name, "users");
                 assert_eq!(*alias, Some("u".to_string()));
             }

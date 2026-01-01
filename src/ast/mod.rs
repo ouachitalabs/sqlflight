@@ -22,6 +22,7 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SelectStatement {
     pub with_clause: Option<WithClause>,
+    pub distinct: bool,
     pub columns: Vec<SelectColumn>,
     pub from: Option<FromClause>,
     pub joins: Vec<JoinClause>,
@@ -29,9 +30,11 @@ pub struct SelectStatement {
     pub group_by: Option<GroupByClause>,
     pub having: Option<HavingClause>,
     pub qualify: Option<QualifyClause>,
+    pub window: Option<WindowClause>,
     pub order_by: Option<OrderByClause>,
     pub limit: Option<LimitClause>,
     pub union: Option<Box<SetOperation>>,
+    pub semicolon: bool,
 }
 
 /// WITH clause (CTEs)
@@ -64,11 +67,28 @@ pub struct FromClause {
 /// A table reference
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableReference {
-    Table { name: String, alias: Option<String> },
-    Subquery { query: Box<SelectStatement>, alias: String },
+    Table {
+        name: String,
+        alias: Option<String>,
+        time_travel: Option<TimeTravelClause>,
+        changes: Option<ChangesClause>,
+        sample: Option<SampleClause>,
+        pivot: Option<PivotClause>,
+        unpivot: Option<UnpivotClause>,
+        match_recognize: Option<MatchRecognizeClause>,
+    },
+    Subquery {
+        query: Box<SelectStatement>,
+        alias: String,
+    },
     JinjaRef(String),
     Flatten(FlattenClause),
     Lateral(Box<TableReference>),
+    TableFunction {
+        name: String,
+        args: Vec<(Option<String>, Expression)>,  // (param_name, value)
+    },
+    Values(ValuesClause),
 }
 
 /// JOIN clause
@@ -485,4 +505,136 @@ pub struct Comment {
 pub enum CommentStyle {
     SingleLine,  // -- comment
     MultiLine,   // /* comment */
+}
+
+/// PIVOT clause (Snowflake-specific)
+#[derive(Debug, Clone, PartialEq)]
+pub struct PivotClause {
+    pub aggregate_functions: Vec<(Expression, Option<String>)>,  // (expr, alias)
+    pub for_column: String,
+    pub in_values: Vec<(Expression, Option<String>)>,  // (value, alias)
+}
+
+/// UNPIVOT clause (Snowflake-specific)
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnpivotClause {
+    pub value_column: String,
+    pub name_column: String,
+    pub columns: Vec<String>,
+    pub include_nulls: bool,
+}
+
+/// SAMPLE/TABLESAMPLE clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampleClause {
+    pub method: SampleMethod,
+    pub size: SampleSize,
+    pub seed: Option<i64>,
+}
+
+/// Sample method
+#[derive(Debug, Clone, PartialEq)]
+pub enum SampleMethod {
+    Default,
+    Bernoulli,
+    System,
+    Block,
+}
+
+/// Sample size specification
+#[derive(Debug, Clone, PartialEq)]
+pub enum SampleSize {
+    Percent(f64),
+    Rows(i64),
+}
+
+/// MATCH_RECOGNIZE clause (Snowflake-specific)
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchRecognizeClause {
+    pub partition_by: Option<Vec<Expression>>,
+    pub order_by: Option<Vec<OrderByItem>>,
+    pub measures: Vec<(Expression, String)>,
+    pub rows_per_match: Option<RowsPerMatch>,
+    pub after_match_skip: Option<AfterMatchSkip>,
+    pub pattern: String,
+    pub define: Vec<(String, Expression)>,
+}
+
+/// Rows per match option
+#[derive(Debug, Clone, PartialEq)]
+pub enum RowsPerMatch {
+    OneRow,
+    AllRows,
+}
+
+/// After match skip option
+#[derive(Debug, Clone, PartialEq)]
+pub enum AfterMatchSkip {
+    PastLastRow,
+    ToNextRow,
+    ToFirst(String),
+    ToLast(String),
+}
+
+/// WINDOW clause for named windows
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowClause {
+    pub definitions: Vec<WindowDefinition>,
+}
+
+/// Named window definition
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowDefinition {
+    pub name: String,
+    pub spec: WindowSpec,
+}
+
+/// Time travel clause (Snowflake-specific)
+#[derive(Debug, Clone, PartialEq)]
+pub enum TimeTravelClause {
+    At(TimeTravelPoint),
+    Before(TimeTravelPoint),
+}
+
+/// Time travel point specification
+#[derive(Debug, Clone, PartialEq)]
+pub enum TimeTravelPoint {
+    Timestamp(Expression),
+    Offset(Expression),
+    Statement(String),
+}
+
+/// CHANGES clause (Snowflake-specific)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangesClause {
+    pub information: ChangesInformation,
+    pub at_or_before: TimeTravelClause,
+}
+
+/// Changes information type
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChangesInformation {
+    Default,
+    AppendOnly,
+}
+
+/// Interval literal
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntervalLiteral {
+    pub value: String,
+    pub unit: String,
+}
+
+/// VALUES clause (Snowflake-specific)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValuesClause {
+    pub rows: Vec<Vec<Expression>>,
+    pub alias: Option<ValuesAlias>,
+}
+
+/// VALUES alias with column names
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValuesAlias {
+    pub table_alias: String,
+    pub column_aliases: Vec<String>,
 }
