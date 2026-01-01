@@ -1053,6 +1053,17 @@ except
 select id from t2",
         );
     }
+
+    #[test]
+    fn union_with_parenthesized_subquery() {
+        // Parenthesized subqueries on right side of UNION
+        assert_formats_to(
+            "SELECT * FROM a UNION (SELECT * FROM b)",
+            "select * from a
+union
+select * from b",
+        );
+    }
 }
 
 // =============================================================================

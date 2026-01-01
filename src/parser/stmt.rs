@@ -1289,7 +1289,15 @@ fn parse_set_operation(parser: &mut Parser) -> Result<Option<Box<SetOperation>>>
 
     if let Some(op_type) = op_type {
         let all = parser.consume(&Token::All);
-        let query = parse_select_statement(parser)?;
+        // The right side can be a SELECT statement or a parenthesized query
+        let query = if parser.check(&Token::LParen) {
+            parser.advance();
+            let inner = parse_select_statement(parser)?;
+            parser.expect(&Token::RParen)?;
+            inner
+        } else {
+            parse_select_statement(parser)?
+        };
         Ok(Some(Box::new(SetOperation {
             op_type,
             all,
