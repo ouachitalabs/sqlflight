@@ -82,11 +82,21 @@ fn parse_with_statement(parser: &mut Parser) -> Result<Statement> {
                 }),
             });
 
-            // Check if there's a comma (more CTEs follow) or we should break
-            if !parser.consume(&Token::Comma) {
-                break;
+            // Check if there's a comma (more CTEs follow)
+            // The Jinja for-loop might not end with a comma if it's the last iteration
+            // so also check if next token looks like a CTE definition
+            if parser.consume(&Token::Comma) {
+                continue;
             }
-            continue;
+            // No comma - check if next token could be a CTE name
+            // (identifier followed by AS or LPAREN)
+            if let Token::Identifier(_) = parser.current() {
+                if matches!(parser.peek(), Token::As | Token::LParen) {
+                    // Looks like another CTE follows without comma (from Jinja loop)
+                    continue;
+                }
+            }
+            break;
         }
 
         let cte = parse_cte(parser)?;

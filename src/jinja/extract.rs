@@ -153,6 +153,14 @@ fn extract_block_content(
     end_tag: &str,
 ) -> Result<BlockContent> {
     let mut content = String::new();
+    let mut depth = 1; // We're already inside one block
+
+    // Determine the start tag from the end tag (e.g., "endfor" -> "for")
+    let start_tag = if let Some(stripped) = end_tag.strip_prefix("end") {
+        Some(stripped)
+    } else {
+        None
+    };
 
     while let Some(c) = chars.next() {
         content.push(c);
@@ -175,27 +183,41 @@ fn extract_block_content(
                     let stmt = extract_until_statement_end(chars)?;
                     let trimmed = stmt.content.trim();
 
+                    // Check for nested start tag (e.g., another "for" when looking for "endfor")
+                    if let Some(start) = start_tag {
+                        if trimmed.starts_with(start) {
+                            // Check that it's followed by whitespace or end (not a longer word)
+                            let after = &trimmed[start.len()..];
+                            if after.is_empty() || after.starts_with(char::is_whitespace) {
+                                depth += 1;
+                            }
+                        }
+                    }
+
                     if trimmed == end_tag {
-                        // Found the end tag! Remove the partial "{%" or "{%-" we added and return
-                        if has_trim {
-                            content.pop(); // remove '-'
+                        depth -= 1;
+                        if depth == 0 {
+                            // Found the matching end tag! Remove the partial "{%" or "{%-" we added
+                            if has_trim {
+                                content.pop(); // remove '-'
+                            }
+                            content.pop(); // remove '%'
+                            content.pop(); // remove '{'
+                            return Ok(BlockContent {
+                                content,
+                                end_starts_trim: has_trim,
+                                end_ends_trim: stmt.ends_with_trim,
+                            });
                         }
-                        content.pop(); // remove '%'
-                        content.pop(); // remove '{'
-                        return Ok(BlockContent {
-                            content,
-                            end_starts_trim: has_trim,
-                            end_ends_trim: stmt.ends_with_trim,
-                        });
+                    }
+
+                    // Include the statement in content
+                    content.push_str(&stmt.content);
+                    // Preserve the original closing marker
+                    if stmt.ends_with_trim {
+                        content.push_str("-%}");
                     } else {
-                        // Not our end tag, include it in content
-                        content.push_str(&stmt.content);
-                        // Preserve the original closing marker
-                        if stmt.ends_with_trim {
-                            content.push_str("-%}");
-                        } else {
-                            content.push_str("%}");
-                        }
+                        content.push_str("%}");
                     }
                 }
             }
