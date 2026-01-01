@@ -91,6 +91,7 @@ pub enum TableReference {
     TableFunction {
         name: String,
         args: Vec<(Option<String>, Expression)>,  // (param_name, value)
+        table_wrapper: bool,  // true if TABLE(func(...)) syntax was used
     },
     Values(ValuesClause),
 }

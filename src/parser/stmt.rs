@@ -330,7 +330,7 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
             let args = parse_table_function_args(parser)?;
             parser.expect(&Token::RParen)?;
             parser.expect(&Token::RParen)?;  // Close the outer TABLE()
-            return Ok(TableReference::TableFunction { name: func_name, args });
+            return Ok(TableReference::TableFunction { name: func_name, args, table_wrapper: true });
         } else {
             // Not TABLE(...), restore and continue as regular table name
             parser.restore(pos);
@@ -343,7 +343,7 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         let args = parse_table_function_args(parser)?;
         parser.expect(&Token::RParen)?;
         // Store as TableFunction with name "FLATTEN"
-        return Ok(TableReference::TableFunction { name: "FLATTEN".to_string(), args });
+        return Ok(TableReference::TableFunction { name: "FLATTEN".to_string(), args, table_wrapper: false });
     }
 
     // Handle subquery

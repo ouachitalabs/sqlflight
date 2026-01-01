@@ -542,6 +542,11 @@ impl Formatter {
             matches!(&from.table, TableReference::Table { sample: Some(_), .. })
         });
 
+        // Check if FROM table is a TABLE(function) call
+        let has_table_function = stmt.from.as_ref().map_or(false, |from| {
+            matches!(&from.table, TableReference::TableFunction { table_wrapper: true, .. })
+        });
+
         // Check if SELECT or table reference has PIVOT/UNPIVOT/MATCH_RECOGNIZE
         let has_pivot_unpivot = stmt.pivot.is_some() || stmt.unpivot.is_some()
             || stmt.from.as_ref().map_or(false, |from| {
@@ -583,6 +588,7 @@ impl Formatter {
             || (has_star && (stmt.where_clause.is_some() || !stmt.joins.is_empty()))
             || has_extra_clauses
             || has_sample
+            || has_table_function
             || has_pivot_unpivot
             || self.in_subquery;
 
@@ -968,7 +974,10 @@ impl Formatter {
                 self.printer.write("lateral ");
                 self.format_table_reference(inner);
             }
-            TableReference::TableFunction { name, args } => {
+            TableReference::TableFunction { name, args, table_wrapper } => {
+                if *table_wrapper {
+                    self.printer.write("table(");
+                }
                 self.printer.write(&format_identifier(name));
                 self.printer.write("(");
                 for (i, (param_name, expr)) in args.iter().enumerate() {
@@ -982,6 +991,9 @@ impl Formatter {
                     self.format_expression(expr);
                 }
                 self.printer.write(")");
+                if *table_wrapper {
+                    self.printer.write(")");
+                }
             }
             TableReference::Values(values) => {
                 self.format_values(values);
