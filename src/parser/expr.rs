@@ -622,11 +622,6 @@ fn is_prefix_operator(name: &str) -> bool {
     name.eq_ignore_ascii_case("CONNECT_BY_ROOT")
 }
 
-/// Check if this is a keyword prefix operator
-fn is_keyword_prefix_operator(token: &Token) -> bool {
-    matches!(token, Token::Prior)
-}
-
 /// Check if current token starts a function (identifier followed by '(' or keyword function)
 fn is_function_start(parser: &Parser) -> bool {
     match parser.current() {
