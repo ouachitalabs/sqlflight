@@ -7,6 +7,7 @@ description = "A fast, opinionated SQL formatter for Snowflake with first-class 
 keywords = ["sql", "formatter", "snowflake", "jinja", "dbt"]
 categories = ["command-line-utilities", "development-tools"]
 license = "GPL-2.0"
+repository = "https://github.com/ouachitalabs/sqlflight"
 rust-version = "1.85"
 
 [dependencies]
