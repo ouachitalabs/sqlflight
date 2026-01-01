@@ -368,6 +368,14 @@ match_recognize (
 )",
         );
     }
+
+    #[test]
+    fn match_recognize_final_running_modifiers() {
+        assert_formats_to(
+            "SELECT FINAL LAST(price) AS fp, RUNNING AVG(price) AS rp FROM t",
+            "select final last(price) as fp, running avg(price) as rp from t",
+        );
+    }
 }
 
 // =============================================================================

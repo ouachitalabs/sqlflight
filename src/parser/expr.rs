@@ -611,6 +611,21 @@ fn parse_postfix_expression(parser: &mut Parser) -> Result<Expression> {
     Ok(expr)
 }
 
+/// Check if this is a row pattern modifier (FINAL or RUNNING) for MATCH_RECOGNIZE
+fn is_row_pattern_modifier(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    upper == "FINAL" || upper == "RUNNING"
+}
+
+/// Check if current token starts a function (identifier followed by '(' or keyword function)
+fn is_function_start(parser: &Parser) -> bool {
+    match parser.current() {
+        Token::Identifier(_) => true,
+        Token::Last | Token::First | Token::Match => true,
+        _ => false,
+    }
+}
+
 /// Parse primary expression (literals, identifiers, function calls, etc.)
 fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
     match parser.current().clone() {
@@ -688,6 +703,13 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
             // Check if it's a function call
             if parser.check(&Token::LParen) {
                 parse_function_call(parser, name)
+            } else if is_row_pattern_modifier(&name) && is_function_start(parser) {
+                // FINAL/RUNNING modifiers for aggregate functions in MATCH_RECOGNIZE
+                let inner_expr = parse_primary_expression(parser)?;
+                Ok(Expression::RowPatternModifier {
+                    modifier: name.to_uppercase(),
+                    expr: Box::new(inner_expr),
+                })
             } else {
                 Ok(Expression::Identifier(name))
             }

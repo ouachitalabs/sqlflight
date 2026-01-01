@@ -293,6 +293,11 @@ pub enum Expression {
         case_insensitive: bool,  // true for ILIKE, false for LIKE
         quantifier: String,      // "any" or "all"
     },
+    /// Row pattern modifier (FINAL/RUNNING) for MATCH_RECOGNIZE
+    RowPatternModifier {
+        modifier: String,  // "FINAL" or "RUNNING"
+        expr: Box<Expression>,
+    },
 }
 
 /// Literal values

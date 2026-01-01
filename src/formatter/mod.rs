@@ -1834,6 +1834,11 @@ impl Formatter {
                 }
                 self.printer.write(")");
             }
+            Expression::RowPatternModifier { modifier, expr } => {
+                self.printer.write(&modifier.to_lowercase());
+                self.printer.write(" ");
+                self.format_expression(expr);
+            }
         }
     }
 
