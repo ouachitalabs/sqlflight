@@ -836,9 +836,21 @@ fn parse_function_call(parser: &mut Parser, name: String) -> Result<Expression> 
         // Parse DISTINCT if present
         let _has_distinct = parser.consume(&Token::Distinct);
 
-        args.push(parse_expression(parser)?);
-        while parser.consume(&Token::Comma) {
+        // Check for subquery as argument (e.g., ANY(SELECT ...), ALL(SELECT ...))
+        if parser.check(&Token::Select) || parser.check(&Token::With) {
+            let subquery = super::stmt::parse_select_statement(parser)?;
+            args.push(Expression::Subquery(Box::new(subquery)));
+        } else {
             args.push(parse_expression(parser)?);
+        }
+        while parser.consume(&Token::Comma) {
+            // Check for subquery in each argument position
+            if parser.check(&Token::Select) || parser.check(&Token::With) {
+                let subquery = super::stmt::parse_select_statement(parser)?;
+                args.push(Expression::Subquery(Box::new(subquery)));
+            } else {
+                args.push(parse_expression(parser)?);
+            }
         }
     }
 

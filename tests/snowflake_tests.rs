@@ -1285,3 +1285,42 @@ select * from cte",
         assert_idempotent("WITH RECURSIVE nums AS (SELECT 1 n UNION ALL SELECT n+1 FROM nums WHERE n<5) SELECT * FROM nums");
     }
 }
+
+// =============================================================================
+// ANY/ALL/SOME SUBQUERY TESTS - Comparison operators with subqueries
+// =============================================================================
+
+mod any_all_some {
+    use super::*;
+
+    #[test]
+    fn any_with_subquery() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE x = ANY(SELECT y FROM t2)",
+            "select *
+from t
+where x = any((
+    select y
+    from t2
+  ))",
+        );
+    }
+
+    #[test]
+    fn some_with_subquery() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE x < SOME(SELECT y FROM t2)",
+            "select *
+from t
+where x < some((
+    select y
+    from t2
+  ))",
+        );
+    }
+
+    #[test]
+    fn any_subquery_idempotent() {
+        assert_idempotent("SELECT * FROM orders WHERE amount = ANY(SELECT limit_amount FROM customers)");
+    }
+}
