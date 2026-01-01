@@ -343,24 +343,30 @@ mod tokenize_punctuation {
 
 mod tokenize_comments {
     use super::*;
+    use sqlflight::parser::lexer::tokenize_with_comments;
 
     #[test]
     fn tokenize_single_line_comment() {
-        let tokens = tokenize("-- this is a comment").expect("should tokenize");
-        assert!(matches!(&tokens[0], Token::SingleLineComment(s) if s.contains("this is a comment")));
+        // Comments are extracted to a separate comments vector, not returned in tokens
+        let result = tokenize_with_comments("-- this is a comment").expect("should tokenize");
+        assert_eq!(result.comments.len(), 1);
+        assert!(result.comments[0].text.contains("this is a comment"));
+        assert!(!result.comments[0].is_block);
     }
 
     #[test]
     fn tokenize_multi_line_comment() {
-        let tokens = tokenize("/* this is\na comment */").expect("should tokenize");
-        assert!(matches!(&tokens[0], Token::MultiLineComment(_)));
+        let result = tokenize_with_comments("/* this is\na comment */").expect("should tokenize");
+        assert_eq!(result.comments.len(), 1);
+        assert!(result.comments[0].is_block);
     }
 
     #[test]
     fn tokenize_nested_comment() {
         // Snowflake supports nested comments
-        let tokens = tokenize("/* outer /* inner */ outer */").expect("should tokenize");
-        assert!(matches!(&tokens[0], Token::MultiLineComment(_)));
+        let result = tokenize_with_comments("/* outer /* inner */ outer */").expect("should tokenize");
+        assert_eq!(result.comments.len(), 1);
+        assert!(result.comments[0].is_block);
     }
 }
 
@@ -381,8 +387,11 @@ mod tokenize_jinja {
 
     #[test]
     fn tokenize_jinja_comment() {
-        let tokens = tokenize("{# a comment #}").expect("should tokenize");
-        assert!(matches!(&tokens[0], Token::JinjaComment(s) if s.contains("a comment")));
+        // Jinja comments are extracted to the comments vector, not returned in tokens
+        use sqlflight::parser::lexer::tokenize_with_comments;
+        let result = tokenize_with_comments("{# a comment #}").expect("should tokenize");
+        assert_eq!(result.comments.len(), 1);
+        assert!(result.comments[0].text.contains("a comment"));
     }
 
     #[test]

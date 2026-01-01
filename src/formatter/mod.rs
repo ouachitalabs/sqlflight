@@ -25,8 +25,10 @@ pub fn format_sql(input: &str) -> Result<String> {
     let comments = tokenize_result.comments;
 
     // Step 4: Parse SQL
-    // If there are no tokens (e.g., only Jinja), return the original
-    if tokenize_result.tokens.is_empty() {
+    // If there are no tokens (e.g., only Jinja), or only EOF token,
+    // return the original with reintegrated Jinja
+    let has_real_tokens = tokenize_result.tokens.iter().any(|t| !matches!(t, crate::parser::lexer::Token::Eof));
+    if !has_real_tokens {
         return Ok(jinja::reintegrate_jinja(input, &placeholders));
     }
     let mut parser = Parser::new(&tokenize_result.tokens);
@@ -151,20 +153,9 @@ fn extract_statement_level_placeholders(input: &str) -> JinjaLineInfo {
         }
     }
 
-    // Find inline statement placeholders (placeholders on their own lines within body)
-    let mut body_lines = Vec::new();
-    for (i, line) in lines[body_start..body_end].iter().enumerate() {
-        let trimmed = line.trim();
-        if is_pure_placeholder_line(trimmed) {
-            inline_statements.push((i, trimmed.to_string()));
-            // Keep the line empty as a marker
-            body_lines.push("");
-        } else {
-            body_lines.push(*line);
-        }
-    }
-
-    let final_body = body_lines.join("\n");
+    // Keep all lines in the body - placeholders within the SQL are treated as identifiers
+    // Only leading/trailing placeholders are extracted
+    let final_body = lines[body_start..body_end].join("\n");
 
     JinjaLineInfo {
         leading,
