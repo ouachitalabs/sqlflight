@@ -532,9 +532,14 @@ impl Formatter {
         // If any column is *, we break to multiline when there's a WHERE clause
         let has_star = stmt.columns.iter().any(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
 
-        // Check if FROM has a subquery
+        // Check if FROM has a subquery or sample clause
         let has_subquery_from = stmt.from.as_ref().map_or(false, |from| {
             matches!(from.table, TableReference::Subquery { .. })
+        });
+
+        // Check if FROM table has a SAMPLE clause
+        let has_sample = stmt.from.as_ref().map_or(false, |from| {
+            matches!(&from.table, TableReference::Table { sample: Some(_), .. })
         });
 
         // Can only inline if: no other clauses except simple WHERE with named columns
@@ -565,10 +570,11 @@ impl Formatter {
             && !self.in_subquery;  // Never simple when inside a subquery
 
         // FROM should be on new line if: vertical columns, has star with WHERE/JOINs, has extra clauses,
-        // or we're inside a subquery
+        // we're inside a subquery, or there's a SAMPLE clause
         let force_from_newline = !columns_inline
             || (has_star && (stmt.where_clause.is_some() || !stmt.joins.is_empty()))
             || has_extra_clauses
+            || has_sample
             || self.in_subquery;
 
         // FROM clause
@@ -875,11 +881,16 @@ impl Formatter {
 
     fn format_table_reference(&mut self, table: &TableReference) {
         match table {
-            TableReference::Table { name, alias, .. } => {
+            TableReference::Table { name, alias, sample, .. } => {
                 self.printer.write(&format_identifier(name));
                 if let Some(a) = alias {
                     self.printer.write(" ");
                     self.printer.write(&format_identifier(a));
+                }
+                // Format SAMPLE clause
+                if let Some(sample) = sample {
+                    self.printer.newline();
+                    self.format_sample(sample);
                 }
             }
             TableReference::Subquery { query, alias, explicit_as } => {
@@ -952,6 +963,41 @@ impl Formatter {
             self.printer.write("'");
         }
         self.printer.write(")");
+    }
+
+    fn format_sample(&mut self, sample: &SampleClause) {
+        // Use SAMPLE or TABLESAMPLE based on original input
+        if sample.tablesample {
+            self.printer.write("tablesample");
+        } else {
+            self.printer.write("sample");
+        }
+        match sample.method {
+            SampleMethod::Default => {}
+            SampleMethod::Bernoulli => self.printer.write(" bernoulli"),
+            SampleMethod::System => self.printer.write(" system"),
+            SampleMethod::Block => self.printer.write(" block"),
+        }
+        self.printer.write(" (");
+        // Format size
+        match &sample.size {
+            SampleSize::Percent(p) => {
+                // Format without trailing zeros
+                if p.fract() == 0.0 {
+                    self.printer.write(&format!("{}", *p as i64));
+                } else {
+                    self.printer.write(&format!("{}", p));
+                }
+            }
+            SampleSize::Rows(n) => {
+                self.printer.write(&format!("{} rows", n));
+            }
+        }
+        self.printer.write(")");
+        // Format seed if present
+        if let Some(seed) = sample.seed {
+            self.printer.write(&format!(" seed ({})", seed));
+        }
     }
 
     fn format_values(&mut self, values: &ValuesClause) {

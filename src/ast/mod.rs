@@ -552,6 +552,7 @@ pub struct SampleClause {
     pub method: SampleMethod,
     pub size: SampleSize,
     pub seed: Option<i64>,
+    pub tablesample: bool,  // true if TABLESAMPLE was used, false for SAMPLE
 }
 
 /// Sample method

@@ -350,16 +350,86 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     // Optional alias
     let alias = parse_optional_alias(parser);
 
+    // Parse optional SAMPLE/TABLESAMPLE clause
+    let sample = parse_sample_clause(parser)?;
+
     Ok(TableReference::Table {
         name,
         alias,
         time_travel: None,
         changes: None,
-        sample: None,
+        sample,
         pivot: None,
         unpivot: None,
         match_recognize: None,
     })
+}
+
+/// Parse optional SAMPLE/TABLESAMPLE clause
+fn parse_sample_clause(parser: &mut Parser) -> Result<Option<SampleClause>> {
+    // SAMPLE [method] (size) [SEED (n)]
+    // TABLESAMPLE [method] (size) [SEED (n)]
+    let tablesample = if parser.consume(&Token::Tablesample) {
+        true
+    } else if parser.consume(&Token::Sample) {
+        false
+    } else {
+        return Ok(None);
+    };
+
+    // Parse optional method: BERNOULLI, SYSTEM, BLOCK
+    let method = if parser.consume(&Token::Bernoulli) {
+        SampleMethod::Bernoulli
+    } else if parser.consume(&Token::System) {
+        SampleMethod::System
+    } else if parser.consume(&Token::Block) {
+        SampleMethod::Block
+    } else {
+        SampleMethod::Default
+    };
+
+    parser.expect(&Token::LParen)?;
+
+    // Parse size - either a number (percent) or "n ROWS"
+    let size = if let Token::IntegerLiteral(n) = parser.current().clone() {
+        parser.advance();
+        // Check for ROWS keyword
+        if parser.consume(&Token::Rows) {
+            SampleSize::Rows(n)
+        } else {
+            SampleSize::Percent(n as f64)
+        }
+    } else if let Token::FloatLiteral(n) = parser.current().clone() {
+        parser.advance();
+        SampleSize::Percent(n)
+    } else {
+        return Err(crate::Error::ParseError {
+            message: "Expected sample size".to_string(),
+            span: None,
+        });
+    };
+
+    parser.expect(&Token::RParen)?;
+
+    // Parse optional SEED clause
+    let seed = if parser.consume(&Token::Seed) {
+        parser.expect(&Token::LParen)?;
+        let seed_val = if let Token::IntegerLiteral(n) = parser.current().clone() {
+            parser.advance();
+            n
+        } else {
+            return Err(crate::Error::ParseError {
+                message: "Expected seed value".to_string(),
+                span: None,
+            });
+        };
+        parser.expect(&Token::RParen)?;
+        Some(seed_val)
+    } else {
+        None
+    };
+
+    Ok(Some(SampleClause { method, size, seed, tablesample }))
 }
 
 /// Parse qualified table name (schema.table)
