@@ -50,6 +50,45 @@ fn parse_with_statement(parser: &mut Parser) -> Result<Statement> {
     let mut ctes = Vec::new();
 
     loop {
+        // Check if current token is a Jinja placeholder that represents CTE-generating block
+        // (like a for-loop that generates multiple CTEs)
+        let jinja_cte_placeholder = if let Token::Identifier(name) = parser.current() {
+            let next_token = parser.peek();
+            let next_is_as = matches!(next_token, Token::As);
+            let next_is_lparen = matches!(next_token, Token::LParen);
+            if name.starts_with("__SQLFLIGHT_JINJA_") && !next_is_as && !next_is_lparen {
+                Some(name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(name) = jinja_cte_placeholder {
+            // This is a Jinja block placeholder that will expand to CTEs at runtime
+            // Create a placeholder CTE with a Jinja query
+            parser.advance();
+            ctes.push(CommonTableExpression {
+                name: name.clone(),
+                columns: None,
+                query: Box::new(SelectStatement {
+                    columns: vec![SelectColumn {
+                        expr: Expression::JinjaBlock(name.clone()),
+                        alias: None,
+                        explicit_as: false,
+                    }],
+                    ..Default::default()
+                }),
+            });
+
+            // Check if there's a comma (more CTEs follow) or we should break
+            if !parser.consume(&Token::Comma) {
+                break;
+            }
+            continue;
+        }
+
         let cte = parse_cte(parser)?;
         ctes.push(cte);
 

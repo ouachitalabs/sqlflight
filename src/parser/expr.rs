@@ -312,6 +312,43 @@ fn parse_comparison_expression(parser: &mut Parser) -> Result<Expression> {
 
     if let Some(op) = op {
         parser.advance();
+
+        // Handle LIKE/ILIKE ANY/ALL (pattern_list) - Snowflake pattern matching
+        if matches!(op, BinaryOperator::Like | BinaryOperator::ILike) {
+            // Check for ANY/ALL - either as Token::All keyword or as identifier "ANY"
+            let quantifier = if parser.check(&Token::All) {
+                parser.advance();
+                Some("all".to_string())
+            } else if let Token::Identifier(name) = parser.current() {
+                if name.to_uppercase() == "ANY" {
+                    let q = name.clone();
+                    parser.advance();
+                    Some(q)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(quant) = quantifier {
+                // Parse the pattern list: (pattern1, pattern2, ...)
+                parser.expect(&Token::LParen)?;
+                let mut patterns = vec![parse_expression(parser)?];
+                while parser.consume(&Token::Comma) {
+                    patterns.push(parse_expression(parser)?);
+                }
+                parser.expect(&Token::RParen)?;
+
+                return Ok(Expression::LikeAny {
+                    expr: Box::new(left),
+                    patterns,
+                    case_insensitive: matches!(op, BinaryOperator::ILike),
+                    quantifier: quant.to_lowercase(),
+                });
+            }
+        }
+
         let right = parse_between_in_expression(parser)?;
         return Ok(Expression::BinaryOp {
             left: Box::new(left),

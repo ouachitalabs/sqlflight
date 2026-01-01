@@ -286,6 +286,13 @@ pub enum Expression {
     },
     /// Positional column reference ($1, $2, etc.) used in staged file queries
     PositionalColumn(u32),
+    /// LIKE ANY/ALL pattern matching (Snowflake)
+    LikeAny {
+        expr: Box<Expression>,
+        patterns: Vec<Expression>,
+        case_insensitive: bool,  // true for ILIKE, false for LIKE
+        quantifier: String,      // "any" or "all"
+    },
 }
 
 /// Literal values

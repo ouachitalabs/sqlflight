@@ -702,6 +702,18 @@ impl Formatter {
     }
 
     fn format_cte(&mut self, cte: &CommonTableExpression) {
+        // Check if this is a Jinja placeholder CTE (for-loop that generates CTEs)
+        // These are identified by having a Jinja placeholder name and a JinjaBlock query
+        if cte.name.starts_with("__SQLFLIGHT_JINJA_") {
+            if let Some(col) = cte.query.columns.first() {
+                if let Expression::JinjaBlock(block) = &col.expr {
+                    // Just output the Jinja block placeholder - it will be reintegrated later
+                    self.printer.write(block);
+                    return;
+                }
+            }
+        }
+
         self.printer.write(&format_identifier(&cte.name));
 
         if let Some(columns) = &cte.columns {
@@ -1785,6 +1797,19 @@ impl Formatter {
             }
             Expression::PositionalColumn(n) => {
                 self.printer.write(&format!("${}", n));
+            }
+            Expression::LikeAny { expr, patterns, case_insensitive, quantifier } => {
+                self.format_expression(expr);
+                self.printer.write(if *case_insensitive { " ilike " } else { " like " });
+                self.printer.write(quantifier);
+                self.printer.write("(");
+                for (i, pattern) in patterns.iter().enumerate() {
+                    if i > 0 {
+                        self.printer.write(", ");
+                    }
+                    self.format_expression(pattern);
+                }
+                self.printer.write(")");
             }
         }
     }
