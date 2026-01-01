@@ -1061,6 +1061,24 @@ from my_table before (statement => '01234567-89ab-cdef-0123-456789abcdef')",
 from my_table changes (information => default) at (timestamp => '2024-01-01'::timestamp)",
         );
     }
+
+    #[test]
+    fn changes_with_end_clause() {
+        assert_formats_to(
+            "SELECT * FROM my_table CHANGES(INFORMATION=>DEFAULT) AT(TIMESTAMP=>'2024-01-01'::TIMESTAMP) END(TIMESTAMP=>'2024-01-02'::TIMESTAMP)",
+            "select *
+from my_table changes (information => default) at (timestamp => '2024-01-01'::timestamp) end (timestamp => '2024-01-02'::timestamp)",
+        );
+    }
+
+    #[test]
+    fn changes_with_offset_end() {
+        assert_formats_to(
+            "SELECT * FROM my_table CHANGES(INFORMATION=>APPEND_ONLY) AT(OFFSET=>-86400) END(OFFSET=>0)",
+            "select *
+from my_table changes (information => append_only) at (offset => -86400) end (offset => 0)",
+        );
+    }
 }
 
 // =============================================================================

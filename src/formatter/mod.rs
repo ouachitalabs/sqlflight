@@ -1317,6 +1317,13 @@ impl Formatter {
         }
         self.printer.write(") ");
         self.format_time_travel(&changes.at_or_before);
+
+        // Format optional END clause
+        if let Some(end_point) = &changes.end_point {
+            self.printer.write(" end (");
+            self.format_time_travel_point(end_point);
+            self.printer.write(")");
+        }
     }
 
     fn format_values(&mut self, values: &ValuesClause) {

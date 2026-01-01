@@ -673,6 +673,8 @@ pub enum TimeTravelPoint {
 pub struct ChangesClause {
     pub information: ChangesInformation,
     pub at_or_before: TimeTravelClause,
+    /// Optional END point for the changes window
+    pub end_point: Option<TimeTravelPoint>,
 }
 
 /// Changes information type

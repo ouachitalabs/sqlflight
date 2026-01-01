@@ -527,6 +527,36 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     })
 }
 
+/// Parse a time travel point specification (inside the parentheses)
+/// TIMESTAMP => expr | OFFSET => expr | STATEMENT => 'id'
+fn parse_time_travel_point(parser: &mut Parser) -> Result<TimeTravelPoint> {
+    if parser.consume(&Token::Timestamp) {
+        parser.expect(&Token::FatArrow)?;
+        let expr = parse_expression(parser)?;
+        Ok(TimeTravelPoint::Timestamp(expr))
+    } else if parser.consume(&Token::Offset) {
+        parser.expect(&Token::FatArrow)?;
+        let expr = parse_expression(parser)?;
+        Ok(TimeTravelPoint::Offset(expr))
+    } else if parser.consume(&Token::Statement) {
+        parser.expect(&Token::FatArrow)?;
+        if let Token::StringLiteral(id) = parser.current().clone() {
+            parser.advance();
+            Ok(TimeTravelPoint::Statement(id))
+        } else {
+            Err(crate::Error::ParseError {
+                message: "Expected string literal for STATEMENT".to_string(),
+                span: None,
+            })
+        }
+    } else {
+        Err(crate::Error::ParseError {
+            message: "Expected TIMESTAMP, OFFSET, or STATEMENT".to_string(),
+            span: None,
+        })
+    }
+}
+
 /// Parse optional AT/BEFORE time travel clause
 fn parse_time_travel_clause(parser: &mut Parser) -> Result<Option<TimeTravelClause>> {
     // AT (TIMESTAMP => expr | OFFSET => expr | STATEMENT => 'id')
@@ -540,34 +570,7 @@ fn parse_time_travel_clause(parser: &mut Parser) -> Result<Option<TimeTravelClau
     };
 
     parser.expect(&Token::LParen)?;
-
-    // Parse the point specification
-    let point = if parser.consume(&Token::Timestamp) {
-        parser.expect(&Token::FatArrow)?;
-        let expr = parse_expression(parser)?;
-        TimeTravelPoint::Timestamp(expr)
-    } else if parser.consume(&Token::Offset) {
-        parser.expect(&Token::FatArrow)?;
-        let expr = parse_expression(parser)?;
-        TimeTravelPoint::Offset(expr)
-    } else if parser.consume(&Token::Statement) {
-        parser.expect(&Token::FatArrow)?;
-        if let Token::StringLiteral(id) = parser.current().clone() {
-            parser.advance();
-            TimeTravelPoint::Statement(id)
-        } else {
-            return Err(crate::Error::ParseError {
-                message: "Expected string literal for STATEMENT".to_string(),
-                span: None,
-            });
-        }
-    } else {
-        return Err(crate::Error::ParseError {
-            message: "Expected TIMESTAMP, OFFSET, or STATEMENT".to_string(),
-            span: None,
-        });
-    };
-
+    let point = parse_time_travel_point(parser)?;
     parser.expect(&Token::RParen)?;
 
     if is_at {
@@ -632,7 +635,18 @@ fn parse_changes_clause(parser: &mut Parser) -> Result<Option<ChangesClause>> {
             span: None,
         })?;
 
-    Ok(Some(ChangesClause { information, at_or_before }))
+    // Parse optional END clause: END(TIMESTAMP => ... | OFFSET => ...)
+    let end_point = if parser.check(&Token::End) {
+        parser.advance();
+        parser.expect(&Token::LParen)?;
+        let point = parse_time_travel_point(parser)?;
+        parser.expect(&Token::RParen)?;
+        Some(point)
+    } else {
+        None
+    };
+
+    Ok(Some(ChangesClause { information, at_or_before, end_point }))
 }
 
 /// Parse optional SAMPLE/TABLESAMPLE clause
