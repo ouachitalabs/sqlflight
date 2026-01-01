@@ -165,7 +165,7 @@ mod tokenize_literals {
 
     #[test]
     fn tokenize_negative_integer() {
-        let tokens = tokenize("-42").expect("should tokenize");
+        let _tokens = tokenize("-42").expect("should tokenize");
         // Could be Minus + IntegerLiteral or just IntegerLiteral(-42)
         // depending on lexer design
     }
@@ -342,7 +342,6 @@ mod tokenize_punctuation {
 }
 
 mod tokenize_comments {
-    use super::*;
     use sqlflight::parser::lexer::tokenize_with_comments;
 
     #[test]

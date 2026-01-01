@@ -70,7 +70,7 @@ mod keywords {
             ("ON USING MATCHED", "on using matched"),
         ];
 
-        for (input, expected) in inputs {
+        for (_input, _expected) in inputs {
             // Note: These are keyword-only strings that won't form valid SQL,
             // but we're testing keyword lowercasing in isolation
             // The actual parser may reject these - that's expected

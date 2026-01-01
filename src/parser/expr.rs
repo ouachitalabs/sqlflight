@@ -3,23 +3,51 @@
 //! Parses SQL expressions with proper operator precedence using Pratt parsing.
 
 use crate::ast::*;
-use crate::parser::lexer::Token;
+use crate::parser::lexer::{Span, SpannedToken, Token};
 use crate::Result;
 
 /// Parser state for token-based parsing
 pub struct Parser<'a> {
     tokens: &'a [Token],
+    spanned_tokens: &'a [SpannedToken],
+    source: &'a str,
     pos: usize,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            spanned_tokens: &[],
+            source: "",
+            pos: 0,
+        }
+    }
+
+    pub fn new_with_source(
+        tokens: &'a [Token],
+        spanned_tokens: &'a [SpannedToken],
+        source: &'a str,
+    ) -> Self {
+        Parser {
+            tokens,
+            spanned_tokens,
+            source,
+            pos: 0,
+        }
     }
 
     /// Current token
     pub fn current(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+    }
+
+    /// Get the span of the current token
+    pub fn current_span(&self) -> Span {
+        self.spanned_tokens
+            .get(self.pos)
+            .map(|t| t.span)
+            .unwrap_or_default()
     }
 
     /// Peek at the next token
@@ -50,10 +78,7 @@ impl<'a> Parser<'a> {
             self.advance();
             Ok(())
         } else {
-            Err(crate::Error::ParseError {
-                message: format!("Expected {:?}, found {:?}", token, self.current()),
-                span: None,
-            })
+            Err(self.error(&format!("Expected {:?}, found {:?}", token, self.current())))
         }
     }
 
@@ -80,6 +105,23 @@ impl<'a> Parser<'a> {
     /// Check if at end of tokens
     pub fn is_eof(&self) -> bool {
         matches!(self.current(), Token::Eof)
+    }
+
+    /// Create an error with source context
+    pub fn error(&self, message: &str) -> crate::Error {
+        let span = self.current_span();
+        if !self.source.is_empty() && span.start < self.source.len() {
+            let formatted = crate::error::format_parse_error(self.source, span.start, message);
+            crate::Error::ParseError {
+                message: formatted,
+                span: Some((span.start, span.end)),
+            }
+        } else {
+            crate::Error::ParseError {
+                message: format!("Parse error: {}", message),
+                span: None,
+            }
+        }
     }
 }
 

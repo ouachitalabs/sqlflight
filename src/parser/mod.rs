@@ -8,15 +8,15 @@ pub mod stmt;
 use crate::ast::Statement;
 use crate::error::{Error, Result};
 use expr::Parser;
-use lexer::{tokenize, Token};
+use lexer::{tokenize_with_comments, Token};
 
 /// Parse SQL string into AST
 pub fn parse(input: &str) -> Result<Statement> {
     // Step 1: Tokenize
-    let tokens = tokenize(input)?;
+    let result = tokenize_with_comments(input)?;
 
     // Handle empty input
-    if tokens.is_empty() {
+    if result.tokens.is_empty() {
         return Err(Error::ParseError {
             message: "Empty input".to_string(),
             span: None,
@@ -24,7 +24,7 @@ pub fn parse(input: &str) -> Result<Statement> {
     }
 
     // Step 2: Parse tokens into AST
-    let mut parser = Parser::new(&tokens);
+    let mut parser = Parser::new_with_source(&result.tokens, &result.spanned_tokens, input);
     let stmt = stmt::parse_statement(&mut parser)?;
 
     // Step 3: Ensure all tokens were consumed (except optional trailing semicolon and EOF)
@@ -32,10 +32,7 @@ pub fn parse(input: &str) -> Result<Statement> {
         parser.advance();
     }
     if !parser.is_eof() {
-        return Err(Error::ParseError {
-            message: format!("Unexpected token after statement: {:?}", parser.current()),
-            span: None,
-        });
+        return Err(parser.error(&format!("Unexpected token: {:?}", parser.current())));
     }
 
     Ok(stmt)
@@ -44,15 +41,15 @@ pub fn parse(input: &str) -> Result<Statement> {
 /// Parse multiple SQL statements
 pub fn parse_statements(input: &str) -> Result<Vec<Statement>> {
     // Step 1: Tokenize
-    let tokens = tokenize(input)?;
+    let result = tokenize_with_comments(input)?;
 
     // Handle empty input
-    if tokens.is_empty() {
+    if result.tokens.is_empty() {
         return Ok(vec![]);
     }
 
     // Step 2: Parse tokens into AST statements
-    let mut parser = Parser::new(&tokens);
+    let mut parser = Parser::new_with_source(&result.tokens, &result.spanned_tokens, input);
     let mut statements = Vec::new();
 
     while !parser.is_eof() {

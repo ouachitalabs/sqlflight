@@ -54,12 +54,9 @@ pub fn format_sql(input: &str) -> Result<String> {
         result.push_str(&with_comments);
     } else {
         // Reinsert inline placeholders at approximately the right positions
-        let formatted_lines: Vec<&str> = with_comments.lines().collect();
-        let original_lines: Vec<&str> = jinja_info.body.lines().collect();
-
         // Map inline placeholders back to formatted output
         // This is approximate - we preserve them relative to their line context
-        for (line_num, placeholder) in &jinja_info.inline_statements {
+        for (_line_num, placeholder) in &jinja_info.inline_statements {
             // For now, insert inline placeholders at the start of the formatted output
             // This preserves them but may not maintain exact positioning
             result.push_str(placeholder);
@@ -98,7 +95,7 @@ struct JinjaLineInfo {
 fn extract_statement_level_placeholders(input: &str) -> JinjaLineInfo {
     let mut leading = Vec::new();
     let mut trailing = Vec::new();
-    let mut inline_statements = Vec::new();
+    let inline_statements = Vec::new();
     let mut body = input.to_string();
 
     // First, extract inline leading placeholders (at the very start, no newline)
@@ -203,28 +200,6 @@ fn extract_leading_placeholder(s: &str) -> Option<String> {
     None
 }
 
-/// Extract a Jinja placeholder from the end of a string (only if on its own line)
-fn extract_trailing_placeholder(s: &str) -> Option<String> {
-    // Only extract trailing placeholders that are on their own line
-    let lines: Vec<&str> = s.lines().collect();
-    if let Some(last_line) = lines.last() {
-        let trimmed = last_line.trim();
-        let upper = trimmed.to_uppercase();
-        if upper.starts_with(jinja::PLACEHOLDER_PREFIX) {
-            // Check if this is a valid placeholder (ends with __)
-            let prefix_len = jinja::PLACEHOLDER_PREFIX.len();
-            if let Some(end_pos) = upper[prefix_len..].find("__") {
-                let full_end = prefix_len + end_pos + 2;
-                // Must be ONLY the placeholder on this line
-                if full_end == trimmed.len() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Interleave comments into formatted output based on original positions
 fn interleave_comments(original: &str, formatted: &str, comments: &[CommentToken]) -> String {
     if comments.is_empty() {
@@ -312,20 +287,6 @@ fn interleave_comments(original: &str, formatted: &str, comments: &[CommentToken
             });
         }
     }
-
-    // Count how many original lines have SQL content
-    let orig_sql_lines: Vec<usize> = original_lines.iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            let trimmed = line.trim();
-            !trimmed.is_empty()
-                && !trimmed.starts_with("--")
-                && !trimmed.starts_with("/*")
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    let formatted_lines: Vec<&str> = formatted.lines().collect();
 
     // If the formatter merged multiple SQL lines into fewer formatted lines,
     // we need to split them back up when there are trailing comments

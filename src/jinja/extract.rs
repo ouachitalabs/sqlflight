@@ -131,8 +131,6 @@ fn extract_block_content(
     end_tag: &str,
 ) -> Result<BlockContent> {
     let mut content = String::new();
-    let end_pattern = format!("{{% {} %}}", end_tag);
-    let end_pattern_ws = format!("{{% {} %}}", end_tag); // with extra space variants
 
     while let Some(c) = chars.next() {
         content.push(c);

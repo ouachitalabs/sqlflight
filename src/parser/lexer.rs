@@ -174,6 +174,26 @@ pub enum Token {
     Eof,
 }
 
+/// A span in the source code
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Self {
+        Span { start, end }
+    }
+}
+
+/// Token with position information
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
+
 /// Tokenize SQL input
 /// Comment with position information
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +206,7 @@ pub struct CommentToken {
 /// Tokenize result with comments extracted
 pub struct TokenizeResult {
     pub tokens: Vec<Token>,
+    pub spanned_tokens: Vec<SpannedToken>,
     pub comments: Vec<CommentToken>,
 }
 
@@ -197,6 +218,7 @@ pub fn tokenize(input: &str) -> crate::Result<Vec<Token>> {
 pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
     let mut remaining = input;
     let mut tokens = Vec::new();
+    let mut spanned_tokens = Vec::new();
     let mut comments = Vec::new();
     let mut current_line = 1;
 
@@ -211,9 +233,15 @@ pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
         }
         remaining = trimmed;
 
+        // Record position before parsing
+        let start_pos = input.len() - remaining.len();
+
         // Try to parse a token
         match parse_token(&mut remaining) {
             Ok(token) => {
+                let end_pos = input.len() - remaining.len();
+                let span = Span::new(start_pos, end_pos);
+
                 // Extract comments and store with line info
                 match &token {
                     Token::SingleLineComment(text) => {
@@ -244,7 +272,8 @@ pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
                     }
                     _ => {
                         // Don't add comment tokens to the token stream
-                        tokens.push(token);
+                        tokens.push(token.clone());
+                        spanned_tokens.push(SpannedToken { token, span });
                     }
                 }
             }
@@ -258,19 +287,29 @@ pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
                     break;
                 }
 
+                let offset = input.len() - remaining.len();
+                let context_char = remaining.chars().next().unwrap_or(' ');
+                let context_preview: String = remaining.chars().take(20).collect();
+                let message = crate::error::format_parse_error(
+                    input,
+                    offset,
+                    &format!("Unexpected character '{}' near: {}...", context_char, context_preview),
+                );
                 return Err(crate::Error::ParseError {
-                    message: format!(
-                        "Parse error at position {}",
-                        input.len() - remaining.len()
-                    ),
-                    span: Some((input.len() - remaining.len(), input.len())),
+                    message,
+                    span: Some((offset, offset + 1)),
                 });
             }
         }
     }
 
+    let eof_pos = input.len();
     tokens.push(Token::Eof);
-    Ok(TokenizeResult { tokens, comments })
+    spanned_tokens.push(SpannedToken {
+        token: Token::Eof,
+        span: Span::new(eof_pos, eof_pos),
+    });
+    Ok(TokenizeResult { tokens, spanned_tokens, comments })
 }
 
 fn parse_token<'s>(input: &mut &'s str) -> ModalResult<Token> {

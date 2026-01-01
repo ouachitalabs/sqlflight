@@ -36,10 +36,7 @@ pub fn parse_statement(parser: &mut Parser) -> Result<Statement> {
         Token::Create => parse_create_statement(parser),
         Token::Alter => parse_alter_statement(parser),
         Token::Drop => parse_drop_statement(parser),
-        _ => Err(crate::Error::ParseError {
-            message: format!("Unexpected token: {:?}", parser.current()),
-            span: None,
-        }),
+        _ => Err(parser.error(&format!("Unexpected token: {:?}", parser.current()))),
     }
 }
 
