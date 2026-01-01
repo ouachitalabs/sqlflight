@@ -717,9 +717,14 @@ impl Formatter {
 
         // Force vertical based primarily on full line width exceeding target,
         // but also consider extra clauses for longer queries
-        // When there are extra clauses (GROUP BY, WINDOW, etc.), use a tighter threshold
-        // to keep each clause on its own line for readability
-        let width_threshold = if has_extra_clauses { 80 } else { TARGET_WIDTH };
+        // When there are extra clauses (GROUP BY, WINDOW, etc.), use appropriate thresholds:
+        // - With 3+ columns: use tighter threshold (90) for readability
+        // - With 2 columns: use normal threshold (120)
+        let width_threshold = if has_extra_clauses && columns.len() >= 3 {
+            90
+        } else {
+            TARGET_WIDTH
+        };
         let exceeds_width = full_line_width > width_threshold;
         // JOINs force vertical columns when there are multiple columns (but not for SELECT *)
         let joins_force_vertical = has_joins && !all_star && columns.len() > 1;
@@ -771,8 +776,9 @@ impl Formatter {
             Expression::BinaryOp { left, right, .. } => {
                 self.estimate_expr_width(left) + self.estimate_expr_width(right) + 3
             }
-            Expression::FunctionCall { name, args, over } => {
+            Expression::FunctionCall { name, args, within_group, over } => {
                 let base = name.len() + 2 + args.iter().map(|a| self.estimate_expr_width(a) + 2).sum::<usize>();
+                let within_group_width = if within_group.is_some() { 30 } else { 0 };  // " within group (order by ...)"
                 let over_width = if let Some(spec) = over {
                     if spec.window_name.is_some() {
                         // " over window_name" - roughly 15 chars
@@ -784,7 +790,7 @@ impl Formatter {
                 } else {
                     0
                 };
-                base + over_width
+                base + within_group_width + over_width
             }
             _ => 20, // Default estimate for complex expressions
         }
@@ -1228,7 +1234,7 @@ impl Formatter {
                 }
                 self.format_expression(expr);
             }
-            Expression::FunctionCall { name, args, over } => {
+            Expression::FunctionCall { name, args, within_group, over } => {
                 self.printer.write(&format_identifier(name));
                 self.printer.write("(");
                 for (i, arg) in args.iter().enumerate() {
@@ -1238,6 +1244,17 @@ impl Formatter {
                     self.format_expression(arg);
                 }
                 self.printer.write(")");
+                // WITHIN GROUP (ORDER BY ...) for ordered-set aggregates
+                if let Some(order_items) = within_group {
+                    self.printer.write(" within group (order by ");
+                    for (i, item) in order_items.iter().enumerate() {
+                        if i > 0 {
+                            self.printer.write(", ");
+                        }
+                        self.format_order_by_item(item);
+                    }
+                    self.printer.write(")");
+                }
                 if let Some(window_spec) = over {
                     if let Some(ref window_name) = window_spec.window_name {
                         // Reference to a named window from WINDOW clause

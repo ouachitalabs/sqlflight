@@ -738,6 +738,19 @@ fn parse_function_call(parser: &mut Parser, name: String) -> Result<Expression> 
 
     parser.expect(&Token::RParen)?;
 
+    // Check for WITHIN GROUP (ORDER BY ...) - ordered-set aggregate functions
+    let within_group = if parser.consume(&Token::Within) {
+        parser.expect(&Token::Group)?;
+        parser.expect(&Token::LParen)?;
+        parser.expect(&Token::Order)?;
+        parser.expect(&Token::By)?;
+        let items = parse_order_by_items(parser)?;
+        parser.expect(&Token::RParen)?;
+        Some(items)
+    } else {
+        None
+    };
+
     // Check for OVER clause (window function)
     let over = if parser.consume(&Token::Over) {
         if parser.check(&Token::LParen) {
@@ -762,7 +775,7 @@ fn parse_function_call(parser: &mut Parser, name: String) -> Result<Expression> 
         None
     };
 
-    Ok(Expression::FunctionCall { name, args, over })
+    Ok(Expression::FunctionCall { name, args, within_group, over })
 }
 
 /// Parse window specification

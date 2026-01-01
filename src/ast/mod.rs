@@ -206,6 +206,7 @@ pub enum Expression {
     FunctionCall {
         name: String,
         args: Vec<Expression>,
+        within_group: Option<Vec<OrderByItem>>,  // WITHIN GROUP (ORDER BY ...)
         over: Option<WindowSpec>,
     },
     Case(CaseExpression),

@@ -93,6 +93,7 @@ pub enum Token {
     Sample,
     Tablesample,
     Window,
+    Within,
     Groups,
     Extract,
     Date,
@@ -122,7 +123,6 @@ pub enum Token {
     Past,
     One,
     Per,
-    Within,
 
     // Additional keywords
     Default,
@@ -612,6 +612,7 @@ fn parse_keyword_or_identifier<'s>(input: &mut &'s str) -> ModalResult<Token> {
         "SAMPLE" => Token::Sample,
         "TABLESAMPLE" => Token::Tablesample,
         "WINDOW" => Token::Window,
+        "WITHIN" => Token::Within,
         "GROUPS" => Token::Groups,
         "EXTRACT" => Token::Extract,
         "DATE" => Token::Date,
@@ -642,7 +643,6 @@ fn parse_keyword_or_identifier<'s>(input: &mut &'s str) -> ModalResult<Token> {
         "PAST" => Token::Past,
         "ONE" => Token::One,
         "PER" => Token::Per,
-        "WITHIN" => Token::Within,
         _ => Token::Identifier(ident),
     };
 

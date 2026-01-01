@@ -497,7 +497,7 @@ mod function_calls {
         let stmt = parse_ok("SELECT NOW() FROM t");
         let expr = first_column_expr(&stmt);
         match expr {
-            Expression::FunctionCall { name, args, over } => {
+            Expression::FunctionCall { name, args, over, .. } => {
                 assert_eq!(name.to_uppercase(), "NOW");
                 assert!(args.is_empty());
                 assert!(over.is_none());
