@@ -263,15 +263,38 @@ fn parse_not_expression(parser: &mut Parser) -> Result<Expression> {
 fn parse_comparison_expression(parser: &mut Parser) -> Result<Expression> {
     let left = parse_between_in_expression(parser)?;
 
-    // Handle IS NULL / IS NOT NULL
+    // Handle IS NULL / IS NOT NULL / IS TRUE / IS NOT TRUE / IS FALSE / IS NOT FALSE
+    // / IS DISTINCT FROM / IS NOT DISTINCT FROM
     if parser.check(&Token::Is) {
         parser.advance();
         let negated = parser.consume(&Token::Not);
-        parser.expect(&Token::Null)?;
-        return Ok(Expression::IsNull {
-            expr: Box::new(left),
-            negated,
-        });
+
+        if parser.consume(&Token::Null) {
+            return Ok(Expression::IsNull {
+                expr: Box::new(left),
+                negated,
+            });
+        } else if parser.consume(&Token::True) {
+            return Ok(Expression::IsTrue {
+                expr: Box::new(left),
+                negated,
+            });
+        } else if parser.consume(&Token::False) {
+            return Ok(Expression::IsFalse {
+                expr: Box::new(left),
+                negated,
+            });
+        } else if parser.consume(&Token::Distinct) {
+            parser.expect(&Token::From)?;
+            let other = parse_between_in_expression(parser)?;
+            return Ok(Expression::IsDistinctFrom {
+                expr: Box::new(left),
+                other: Box::new(other),
+                negated,
+            });
+        } else {
+            return Err(parser.error("Expected NULL, TRUE, FALSE, or DISTINCT after IS"));
+        }
     }
 
     // Handle comparison operators

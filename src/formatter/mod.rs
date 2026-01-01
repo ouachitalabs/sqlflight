@@ -1684,6 +1684,31 @@ impl Formatter {
                     self.printer.write(" is null");
                 }
             }
+            Expression::IsTrue { expr, negated } => {
+                self.format_expression(expr);
+                if *negated {
+                    self.printer.write(" is not true");
+                } else {
+                    self.printer.write(" is true");
+                }
+            }
+            Expression::IsFalse { expr, negated } => {
+                self.format_expression(expr);
+                if *negated {
+                    self.printer.write(" is not false");
+                } else {
+                    self.printer.write(" is false");
+                }
+            }
+            Expression::IsDistinctFrom { expr, other, negated } => {
+                self.format_expression(expr);
+                if *negated {
+                    self.printer.write(" is not distinct from ");
+                } else {
+                    self.printer.write(" is distinct from ");
+                }
+                self.format_expression(other);
+            }
             Expression::Cast { expr, data_type, shorthand, try_cast } => {
                 if *shorthand {
                     // Use Snowflake's :: cast syntax

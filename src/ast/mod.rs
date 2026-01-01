@@ -241,6 +241,22 @@ pub enum Expression {
         expr: Box<Expression>,
         negated: bool,
     },
+    /// IS [NOT] TRUE
+    IsTrue {
+        expr: Box<Expression>,
+        negated: bool,
+    },
+    /// IS [NOT] FALSE
+    IsFalse {
+        expr: Box<Expression>,
+        negated: bool,
+    },
+    /// IS [NOT] DISTINCT FROM other_expr
+    IsDistinctFrom {
+        expr: Box<Expression>,
+        other: Box<Expression>,
+        negated: bool,
+    },
     Cast {
         expr: Box<Expression>,
         data_type: DataType,

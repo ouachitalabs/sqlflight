@@ -1184,3 +1184,76 @@ mod positional_columns {
         assert_idempotent("SELECT $1, $2, $3 FROM @my_stage/data.csv");
     }
 }
+
+// =============================================================================
+// IS TRUE / IS FALSE / IS DISTINCT FROM - Boolean comparison extensions
+// =============================================================================
+
+mod is_comparisons {
+    use super::*;
+
+    #[test]
+    fn is_true() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE col IS TRUE",
+            "select *
+from t
+where col is true",
+        );
+    }
+
+    #[test]
+    fn is_not_true() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE col IS NOT TRUE",
+            "select *
+from t
+where col is not true",
+        );
+    }
+
+    #[test]
+    fn is_false() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE col IS FALSE",
+            "select *
+from t
+where col is false",
+        );
+    }
+
+    #[test]
+    fn is_not_false() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE col IS NOT FALSE",
+            "select *
+from t
+where col is not false",
+        );
+    }
+
+    #[test]
+    fn is_distinct_from() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE a IS DISTINCT FROM b",
+            "select *
+from t
+where a is distinct from b",
+        );
+    }
+
+    #[test]
+    fn is_not_distinct_from() {
+        assert_formats_to(
+            "SELECT * FROM t WHERE a IS NOT DISTINCT FROM b",
+            "select *
+from t
+where a is not distinct from b",
+        );
+    }
+
+    #[test]
+    fn is_comparisons_idempotent() {
+        assert_idempotent("SELECT * FROM t WHERE a IS TRUE AND b IS NOT DISTINCT FROM c");
+    }
+}
