@@ -318,6 +318,7 @@ pub struct WindowSpec {
     pub partition_by: Option<Vec<Expression>>,
     pub order_by: Option<Vec<OrderByItem>>,
     pub frame: Option<WindowFrame>,
+    pub window_name: Option<String>,  // Reference to a named window from WINDOW clause
 }
 
 /// Window frame specification

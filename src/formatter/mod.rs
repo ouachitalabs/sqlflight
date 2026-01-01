@@ -548,9 +548,15 @@ impl Formatter {
             || !stmt.joins.is_empty()
             || has_subquery_from;
 
+        // Estimate FROM clause width for column layout decision
+        let from_width = stmt.from.as_ref().map_or(0, |from| {
+            self.estimate_from_width(&from.table)
+        });
+
         // Format columns and check if we should stay on same line for FROM
         // Force vertical if there are extra clauses
-        let columns_inline = self.format_select_columns(&stmt.columns, has_extra_clauses);
+        let has_joins = !stmt.joins.is_empty();
+        let columns_inline = self.format_select_columns(&stmt.columns, has_extra_clauses, from_width, has_joins);
 
         let simple_query = columns_inline
             && !has_star  // No star columns when staying inline with WHERE
@@ -694,7 +700,7 @@ impl Formatter {
     }
 
     /// Format SELECT columns. Returns true if formatted inline, false if vertical.
-    fn format_select_columns(&mut self, columns: &[SelectColumn], has_extra_clauses: bool) -> bool {
+    fn format_select_columns(&mut self, columns: &[SelectColumn], has_extra_clauses: bool, from_width: usize, has_joins: bool) -> bool {
         // Estimate total width for inline decision
         let total_width: usize = columns.iter()
             .map(|c| self.estimate_column_width(c))
@@ -706,13 +712,23 @@ impl Formatter {
         // Check if all columns are star expressions (SELECT * or SELECT t.*)
         let all_star = columns.iter().all(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
 
-        // Force vertical if we have extra clauses AND more than 2 named columns (not just *)
-        // 2 columns can still stay inline with extra clauses
-        let force_vertical = has_extra_clauses && !all_star && columns.len() > 2;
+        // Calculate full line width: "select " + columns + " from table"
+        let full_line_width = 7 + total_width + from_width; // 7 = "select "
+
+        // Force vertical based primarily on full line width exceeding target,
+        // but also consider extra clauses for longer queries
+        // When there are extra clauses (GROUP BY, WINDOW, etc.), use a tighter threshold
+        // to keep each clause on its own line for readability
+        let width_threshold = if has_extra_clauses { 80 } else { TARGET_WIDTH };
+        let exceeds_width = full_line_width > width_threshold;
+        // JOINs force vertical columns when there are multiple columns (but not for SELECT *)
+        let joins_force_vertical = has_joins && !all_star && columns.len() > 1;
+        let force_vertical = joins_force_vertical
+            || exceeds_width
+            || (has_extra_clauses && !all_star && columns.len() > SELECT_COLUMN_THRESHOLD);
 
         let should_inline = !force_vertical
             && columns.len() <= SELECT_COLUMN_THRESHOLD
-            && total_width + 7 <= TARGET_WIDTH  // 7 = "select "
             && !has_complex_expr;
 
         if should_inline && !columns.is_empty() {
@@ -755,8 +771,20 @@ impl Formatter {
             Expression::BinaryOp { left, right, .. } => {
                 self.estimate_expr_width(left) + self.estimate_expr_width(right) + 3
             }
-            Expression::FunctionCall { name, args, .. } => {
-                name.len() + 2 + args.iter().map(|a| self.estimate_expr_width(a) + 2).sum::<usize>()
+            Expression::FunctionCall { name, args, over } => {
+                let base = name.len() + 2 + args.iter().map(|a| self.estimate_expr_width(a) + 2).sum::<usize>();
+                let over_width = if let Some(spec) = over {
+                    if spec.window_name.is_some() {
+                        // " over window_name" - roughly 15 chars
+                        15
+                    } else {
+                        // " over (...)" - estimate based on content
+                        self.estimate_window_spec_width(spec)
+                    }
+                } else {
+                    0
+                };
+                base + over_width
             }
             _ => 20, // Default estimate for complex expressions
         }
@@ -771,6 +799,46 @@ impl Formatter {
             Literal::String(s) => s.len() + 2,
             Literal::Date(s) | Literal::Timestamp(s) => s.len() + 7,
         }
+    }
+
+    fn estimate_from_width(&self, table: &TableReference) -> usize {
+        // " from tablename" = 6 + table name length
+        let table_width = match table {
+            TableReference::Table { name, alias, .. } => {
+                name.len() + alias.as_ref().map_or(0, |a| a.len() + 1)
+            }
+            TableReference::Subquery { .. } => 50, // Subqueries force multiline anyway
+            TableReference::JinjaRef(name) => name.len(),
+            TableReference::Flatten(_) => 20,
+            TableReference::Lateral(_) => 30,
+            TableReference::TableFunction { name, .. } => name.len() + 20,
+            TableReference::Values(_) => 30,
+        };
+        6 + table_width // " from " = 6
+    }
+
+    fn estimate_window_spec_width(&self, spec: &WindowSpec) -> usize {
+        let mut width = 8; // " over ()"
+
+        if let Some(ref partition_by) = spec.partition_by {
+            width += 13; // "partition by "
+            width += partition_by.iter().map(|e| self.estimate_expr_width(e) + 2).sum::<usize>();
+        }
+
+        if let Some(ref order_by) = spec.order_by {
+            width += 10; // "order by "
+            width += order_by.iter().map(|item| {
+                let expr_width = self.estimate_expr_width(&item.expr);
+                let dir_width = item.direction.as_ref().map_or(0, |_| 5); // " asc" or " desc"
+                expr_width + dir_width + 2
+            }).sum::<usize>();
+        }
+
+        if spec.frame.is_some() {
+            width += 40; // Rough estimate for frame clause
+        }
+
+        width
     }
 
     /// Check if an expression is complex enough to force vertical layout
@@ -1171,9 +1239,16 @@ impl Formatter {
                 }
                 self.printer.write(")");
                 if let Some(window_spec) = over {
-                    self.printer.write(" over (");
-                    self.format_window_spec(window_spec);
-                    self.printer.write(")");
+                    if let Some(ref window_name) = window_spec.window_name {
+                        // Reference to a named window from WINDOW clause
+                        self.printer.write(" over ");
+                        self.printer.write(window_name);
+                    } else {
+                        // Inline window specification
+                        self.printer.write(" over (");
+                        self.format_window_spec(window_spec);
+                        self.printer.write(")");
+                    }
                 }
             }
             Expression::Case(case) => self.format_case(case),

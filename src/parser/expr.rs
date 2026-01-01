@@ -740,7 +740,24 @@ fn parse_function_call(parser: &mut Parser, name: String) -> Result<Expression> 
 
     // Check for OVER clause (window function)
     let over = if parser.consume(&Token::Over) {
-        Some(parse_window_spec(parser)?)
+        if parser.check(&Token::LParen) {
+            // OVER (...) - inline window specification
+            Some(parse_window_spec(parser)?)
+        } else if let Token::Identifier(window_name) = parser.current().clone() {
+            // OVER window_name - reference to named window
+            parser.advance();
+            Some(WindowSpec {
+                partition_by: None,
+                order_by: None,
+                frame: None,
+                window_name: Some(window_name),
+            })
+        } else {
+            return Err(crate::Error::ParseError {
+                message: format!("Expected window specification or window name after OVER, found {:?}", parser.current()),
+                span: None,
+            });
+        }
     } else {
         None
     };
@@ -812,6 +829,7 @@ fn parse_window_spec(parser: &mut Parser) -> Result<WindowSpec> {
         partition_by,
         order_by,
         frame,
+        window_name: None,
     })
 }
 

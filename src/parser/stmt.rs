@@ -159,7 +159,15 @@ pub fn parse_select_statement(parser: &mut Parser) -> Result<SelectStatement> {
     };
 
     // WINDOW clause
-    let window = None; // TODO: Implement WINDOW clause parsing
+    let window = if parser.consume(&Token::Window) {
+        let mut definitions = vec![parse_window_definition(parser)?];
+        while parser.consume(&Token::Comma) {
+            definitions.push(parse_window_definition(parser)?);
+        }
+        Some(WindowClause { definitions })
+    } else {
+        None
+    };
 
     // ORDER BY clause
     let order_by = if parser.consume(&Token::Order) {
@@ -939,6 +947,107 @@ fn parse_identifier(parser: &mut Parser) -> Result<String> {
             }
         }
     }
+}
+
+/// Parse a window definition: name AS (window_spec)
+fn parse_window_definition(parser: &mut Parser) -> Result<WindowDefinition> {
+    let name = parse_identifier(parser)?;
+    parser.expect(&Token::As)?;
+    parser.expect(&Token::LParen)?;
+
+    let mut partition_by = None;
+    let mut order_by = None;
+    let mut frame = None;
+
+    // PARTITION BY
+    if parser.consume(&Token::Partition) {
+        parser.expect(&Token::By)?;
+        let mut exprs = vec![parse_expression(parser)?];
+        while parser.consume(&Token::Comma) {
+            exprs.push(parse_expression(parser)?);
+        }
+        partition_by = Some(exprs);
+    }
+
+    // ORDER BY
+    if parser.consume(&Token::Order) {
+        parser.expect(&Token::By)?;
+        order_by = Some(parse_order_by_items(parser)?);
+    }
+
+    // Window frame (ROWS, RANGE, GROUPS)
+    let frame_unit = match parser.current() {
+        Token::Rows => {
+            parser.advance();
+            Some(WindowFrameUnit::Rows)
+        }
+        Token::Range => {
+            parser.advance();
+            Some(WindowFrameUnit::Range)
+        }
+        Token::Groups => {
+            parser.advance();
+            Some(WindowFrameUnit::Groups)
+        }
+        _ => None,
+    };
+
+    if let Some(unit) = frame_unit {
+        let has_between = parser.consume(&Token::Between);
+        let start = parse_window_frame_bound(parser)?;
+        let end = if has_between {
+            parser.expect(&Token::And)?;
+            Some(parse_window_frame_bound(parser)?)
+        } else if parser.consume(&Token::And) {
+            Some(parse_window_frame_bound(parser)?)
+        } else {
+            None
+        };
+        frame = Some(WindowFrame { unit, start, end });
+    }
+
+    parser.expect(&Token::RParen)?;
+
+    Ok(WindowDefinition {
+        name,
+        spec: WindowSpec {
+            partition_by,
+            order_by,
+            frame,
+            window_name: None,
+        },
+    })
+}
+
+/// Parse window frame bound
+fn parse_window_frame_bound(parser: &mut Parser) -> Result<WindowFrameBound> {
+    if parser.consume(&Token::Current) {
+        parser.expect(&Token::Row)?;
+        return Ok(WindowFrameBound::CurrentRow);
+    }
+
+    if parser.consume(&Token::Unbounded) {
+        if parser.consume(&Token::Preceding) {
+            return Ok(WindowFrameBound::Preceding(None));
+        } else if parser.consume(&Token::Following) {
+            return Ok(WindowFrameBound::Following(None));
+        }
+    }
+
+    // Check for numeric bound
+    if let Token::IntegerLiteral(n) = parser.current().clone() {
+        parser.advance();
+        if parser.consume(&Token::Preceding) {
+            return Ok(WindowFrameBound::Preceding(Some(n as u64)));
+        } else if parser.consume(&Token::Following) {
+            return Ok(WindowFrameBound::Following(Some(n as u64)));
+        }
+    }
+
+    Err(crate::Error::ParseError {
+        message: format!("Expected window frame bound, found {:?}", parser.current()),
+        span: None,
+    })
 }
 
 /// Convert keyword token to identifier if allowed
