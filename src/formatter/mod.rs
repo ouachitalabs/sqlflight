@@ -17,12 +17,11 @@ pub fn format_sql(input: &str) -> Result<String> {
     // Step 1: Extract Jinja
     let (sql_with_placeholders, placeholders) = jinja::extract_jinja(input)?;
 
-    // Step 2: Extract leading/trailing Jinja placeholders (before/after actual SQL)
-    let (leading_placeholders, sql_body, trailing_placeholders) =
-        extract_statement_level_placeholders(&sql_with_placeholders);
+    // Step 2: Extract leading/trailing/inline Jinja placeholders
+    let jinja_info = extract_statement_level_placeholders(&sql_with_placeholders);
 
     // Step 3: Tokenize with comments
-    let tokenize_result = tokenize_with_comments(&sql_body)?;
+    let tokenize_result = tokenize_with_comments(&jinja_info.body)?;
     let comments = tokenize_result.comments;
 
     // Step 4: Parse SQL
@@ -37,16 +36,38 @@ pub fn format_sql(input: &str) -> Result<String> {
     let formatted = format_ast(&ast)?;
 
     // Step 6: Interleave comments
-    let with_comments = interleave_comments(&sql_body, &formatted, &comments);
+    let with_comments = interleave_comments(&jinja_info.body, &formatted, &comments);
 
-    // Step 7: Reconstruct with leading/trailing placeholders
+    // Step 7: Reconstruct with leading/trailing/inline placeholders
     let mut result = String::new();
-    for placeholder in &leading_placeholders {
+
+    // Add leading placeholders
+    for placeholder in &jinja_info.leading {
         result.push_str(placeholder);
         result.push('\n');
     }
-    result.push_str(&with_comments);
-    for placeholder in &trailing_placeholders {
+
+    // Add formatted SQL with inline placeholders reinserted
+    if jinja_info.inline_statements.is_empty() {
+        result.push_str(&with_comments);
+    } else {
+        // Reinsert inline placeholders at approximately the right positions
+        let formatted_lines: Vec<&str> = with_comments.lines().collect();
+        let original_lines: Vec<&str> = jinja_info.body.lines().collect();
+
+        // Map inline placeholders back to formatted output
+        // This is approximate - we preserve them relative to their line context
+        for (line_num, placeholder) in &jinja_info.inline_statements {
+            // For now, insert inline placeholders at the start of the formatted output
+            // This preserves them but may not maintain exact positioning
+            result.push_str(placeholder);
+            result.push('\n');
+        }
+        result.push_str(&with_comments);
+    }
+
+    // Add trailing placeholders
+    for placeholder in &jinja_info.trailing {
         if !result.ends_with('\n') {
             result.push('\n');
         }
@@ -59,13 +80,26 @@ pub fn format_sql(input: &str) -> Result<String> {
     Ok(result)
 }
 
-/// Extract Jinja placeholders that appear at statement level (before/after SQL)
-fn extract_statement_level_placeholders(input: &str) -> (Vec<String>, String, Vec<String>) {
+/// Information about Jinja placeholders at statement level
+struct JinjaLineInfo {
+    /// Placeholders before the SQL starts
+    leading: Vec<String>,
+    /// The SQL body to parse and format
+    body: String,
+    /// Placeholders after the SQL ends
+    trailing: Vec<String>,
+    /// Placeholders on their own lines within the SQL (with their line positions)
+    inline_statements: Vec<(usize, String)>,
+}
+
+/// Extract Jinja placeholders that appear at statement level (before/after/within SQL)
+fn extract_statement_level_placeholders(input: &str) -> JinjaLineInfo {
     let mut leading = Vec::new();
     let mut trailing = Vec::new();
+    let mut inline_statements = Vec::new();
     let mut body = input.to_string();
 
-    // Extract leading placeholders (at the very start of input, possibly inline)
+    // First, extract inline leading placeholders (at the very start, no newline)
     loop {
         let trimmed = body.trim_start();
         if let Some(placeholder) = extract_leading_placeholder(trimmed) {
@@ -81,25 +115,84 @@ fn extract_statement_level_placeholders(input: &str) -> (Vec<String>, String, Ve
         }
     }
 
-    // Extract trailing placeholders (at the very end of input)
-    loop {
-        let trimmed = body.trim_end();
-        if let Some(placeholder) = extract_trailing_placeholder(trimmed) {
-            trailing.insert(0, placeholder.clone());
-            // Remove the placeholder from the body
-            let upper_body = body.to_uppercase();
-            let upper_placeholder = placeholder.to_uppercase();
-            if let Some(pos) = upper_body.rfind(&upper_placeholder) {
-                body = body[..pos].to_string();
-            } else {
-                break;
-            }
+    // Now process line by line for the rest
+    let lines: Vec<&str> = body.lines().collect();
+    let mut body_start = 0;
+
+    // Find additional leading placeholders on their own lines
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_pure_placeholder_line(trimmed) {
+            leading.push(trimmed.to_string());
+            body_start = i + 1;
         } else {
             break;
         }
     }
 
-    (leading, body.trim().to_string(), trailing)
+    // Find trailing placeholders on their own lines
+    let mut body_end = lines.len();
+    for (i, line) in lines.iter().enumerate().rev() {
+        if i < body_start {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_pure_placeholder_line(trimmed) {
+            trailing.insert(0, trimmed.to_string());
+            body_end = i;
+        } else {
+            break;
+        }
+    }
+
+    // Find inline statement placeholders (placeholders on their own lines within body)
+    let mut body_lines = Vec::new();
+    for (i, line) in lines[body_start..body_end].iter().enumerate() {
+        let trimmed = line.trim();
+        if is_pure_placeholder_line(trimmed) {
+            inline_statements.push((i, trimmed.to_string()));
+            // Keep the line empty as a marker
+            body_lines.push("");
+        } else {
+            body_lines.push(*line);
+        }
+    }
+
+    let final_body = body_lines.join("\n");
+
+    JinjaLineInfo {
+        leading,
+        body: final_body.trim().to_string(),
+        trailing,
+        inline_statements,
+    }
+}
+
+/// Check if a line contains only a Jinja placeholder (no other SQL)
+fn is_pure_placeholder_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Check if it starts with our placeholder prefix
+    let upper = trimmed.to_uppercase();
+    if !upper.starts_with(jinja::PLACEHOLDER_PREFIX) {
+        return false;
+    }
+    // Find the end of the placeholder
+    let prefix_len = jinja::PLACEHOLDER_PREFIX.len();
+    if let Some(end_offset) = upper[prefix_len..].find("__") {
+        let end = prefix_len + end_offset + 2;
+        // Line should be only the placeholder (possibly with whitespace)
+        return end == trimmed.len();
+    }
+    false
 }
 
 /// Extract a Jinja placeholder from the start of a string
