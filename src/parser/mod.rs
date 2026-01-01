@@ -25,7 +25,20 @@ pub fn parse(input: &str) -> Result<Statement> {
 
     // Step 2: Parse tokens into AST
     let mut parser = Parser::new(&tokens);
-    stmt::parse_statement(&mut parser)
+    let stmt = stmt::parse_statement(&mut parser)?;
+
+    // Step 3: Ensure all tokens were consumed (except optional trailing semicolon and EOF)
+    while parser.check(&Token::Semicolon) {
+        parser.advance();
+    }
+    if !parser.is_eof() {
+        return Err(Error::ParseError {
+            message: format!("Unexpected token after statement: {:?}", parser.current()),
+            span: None,
+        });
+    }
+
+    Ok(stmt)
 }
 
 /// Parse multiple SQL statements

@@ -100,6 +100,7 @@ pub struct JoinClause {
     pub table: TableReference,
     pub condition: Option<Expression>,
     pub explicit_inner: bool,  // Track if INNER was explicitly written
+    pub is_comma_join: bool,   // Track if this was FROM a, b syntax (implicit cross join)
 }
 
 /// JOIN types
@@ -250,6 +251,9 @@ pub enum Expression {
     },
     Star,
     QualifiedStar(String),
+    Exists {
+        subquery: Box<SelectStatement>,
+    },
 }
 
 /// Literal values

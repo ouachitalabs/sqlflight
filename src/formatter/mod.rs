@@ -913,6 +913,13 @@ impl Formatter {
     }
 
     fn format_join(&mut self, join: &JoinClause) {
+        // Comma joins use comma separator instead of JOIN keyword
+        if join.is_comma_join {
+            self.printer.write(", ");
+            self.format_table_reference(&join.table);
+            return;
+        }
+
         let join_keyword = match join.join_type {
             JoinType::Inner => {
                 if join.explicit_inner {
@@ -1280,6 +1287,14 @@ impl Formatter {
                 self.printer.write("[");
                 self.format_expression(index);
                 self.printer.write("]");
+            }
+            Expression::Exists { subquery } => {
+                self.printer.write("exists (");
+                let was_in_subquery = self.in_subquery;
+                self.in_subquery = true;
+                self.format_select(subquery);
+                self.in_subquery = was_in_subquery;
+                self.printer.write(")");
             }
         }
     }

@@ -592,17 +592,19 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
             Ok(Expression::Identifier(name))
         }
 
-        // DATE literal
+        // DATE - can be either a date literal (DATE 'yyyy-mm-dd') or an identifier
         Token::Date => {
+            let pos = parser.position();
             parser.advance();
             if let Token::StringLiteral(s) = parser.current().clone() {
+                // DATE followed by string literal is a date literal
                 parser.advance();
                 Ok(Expression::Literal(Literal::Date(s)))
             } else {
-                Err(crate::Error::ParseError {
-                    message: "Expected string after DATE".to_string(),
-                    span: None,
-                })
+                // DATE followed by anything else - treat as identifier
+                parser.restore(pos);
+                parser.advance(); // consume DATE token
+                Ok(Expression::Identifier("date".to_string()))
             }
         }
 
@@ -618,6 +620,15 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
                     span: None,
                 })
             }
+        }
+
+        // EXISTS subquery expression
+        Token::Exists => {
+            parser.advance();
+            parser.expect(&Token::LParen)?;
+            let subquery = Box::new(crate::parser::stmt::parse_select_statement(parser)?);
+            parser.expect(&Token::RParen)?;
+            Ok(Expression::Exists { subquery })
         }
 
         _ => Err(crate::Error::ParseError {
@@ -779,8 +790,15 @@ fn parse_window_spec(parser: &mut Parser) -> Result<WindowSpec> {
     };
 
     if let Some(unit) = frame_unit {
+        // Check for BETWEEN ... AND ... syntax
+        let has_between = parser.consume(&Token::Between);
         let start = parse_window_frame_bound(parser)?;
-        let end = if parser.consume(&Token::And) {
+        let end = if has_between {
+            // BETWEEN requires AND
+            parser.expect(&Token::And)?;
+            Some(parse_window_frame_bound(parser)?)
+        } else if parser.consume(&Token::And) {
+            // Optional AND for non-BETWEEN syntax
             Some(parse_window_frame_bound(parser)?)
         } else {
             None

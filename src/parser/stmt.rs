@@ -290,6 +290,38 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         return Ok(TableReference::Lateral(Box::new(inner)));
     }
 
+    // Handle TABLE(function_call) - Snowflake table function syntax
+    if parser.check(&Token::Table) {
+        let pos = parser.position();
+        parser.advance();
+        if parser.consume(&Token::LParen) {
+            // This is TABLE(function_call) syntax
+            // Handle FLATTEN specifically since it's a keyword
+            let func_name = if parser.consume(&Token::Flatten) {
+                "FLATTEN".to_string()
+            } else {
+                parse_qualified_table_name(parser)?
+            };
+            parser.expect(&Token::LParen)?;
+            let args = parse_table_function_args(parser)?;
+            parser.expect(&Token::RParen)?;
+            parser.expect(&Token::RParen)?;  // Close the outer TABLE()
+            return Ok(TableReference::TableFunction { name: func_name, args });
+        } else {
+            // Not TABLE(...), restore and continue as regular table name
+            parser.restore(pos);
+        }
+    }
+
+    // Handle direct FLATTEN syntax (without TABLE wrapper)
+    if parser.consume(&Token::Flatten) {
+        parser.expect(&Token::LParen)?;
+        let args = parse_table_function_args(parser)?;
+        parser.expect(&Token::RParen)?;
+        // Store as TableFunction with name "FLATTEN"
+        return Ok(TableReference::TableFunction { name: "FLATTEN".to_string(), args });
+    }
+
     // Handle subquery
     if parser.check(&Token::LParen) {
         parser.advance();
@@ -334,6 +366,44 @@ fn parse_qualified_table_name(parser: &mut Parser) -> Result<String> {
     Ok(name)
 }
 
+/// Parse table function arguments (name => value pairs or positional)
+fn parse_table_function_args(parser: &mut Parser) -> Result<Vec<(Option<String>, Expression)>> {
+    let mut args = Vec::new();
+
+    if parser.check(&Token::RParen) {
+        return Ok(args);
+    }
+
+    loop {
+        // Check for named argument (name => value)
+        let arg = if let Token::Identifier(name) = parser.current().clone() {
+            let pos = parser.position();
+            parser.advance();
+            if parser.consume(&Token::FatArrow) {
+                // Named argument
+                let value = parse_expression(parser)?;
+                (Some(name), value)
+            } else {
+                // Not a named argument, restore and parse as expression
+                parser.restore(pos);
+                let value = parse_expression(parser)?;
+                (None, value)
+            }
+        } else {
+            // Positional argument
+            let value = parse_expression(parser)?;
+            (None, value)
+        };
+        args.push(arg);
+
+        if !parser.consume(&Token::Comma) {
+            break;
+        }
+    }
+
+    Ok(args)
+}
+
 /// Parse optional alias (with or without AS)
 fn parse_optional_alias(parser: &mut Parser) -> Option<String> {
     if parser.consume(&Token::As) {
@@ -361,34 +431,38 @@ fn parse_join_clauses(parser: &mut Parser) -> Result<Vec<JoinClause>> {
     let mut joins = Vec::new();
 
     loop {
-        let (join_type, explicit_inner) = if parser.consume(&Token::Cross) {
+        let (join_type, explicit_inner, is_comma_join) = if parser.consume(&Token::Cross) {
             parser.expect(&Token::Join)?;
-            (Some(JoinType::Cross), false)
+            (Some(JoinType::Cross), false, false)
         } else if parser.consume(&Token::Inner) {
             parser.expect(&Token::Join)?;
-            (Some(JoinType::Inner), true)  // Explicit INNER
+            (Some(JoinType::Inner), true, false)  // Explicit INNER
         } else if parser.consume(&Token::Left) {
             parser.consume(&Token::Outer);
             parser.expect(&Token::Join)?;
-            (Some(JoinType::Left), false)
+            (Some(JoinType::Left), false, false)
         } else if parser.consume(&Token::Right) {
             parser.consume(&Token::Outer);
             parser.expect(&Token::Join)?;
-            (Some(JoinType::Right), false)
+            (Some(JoinType::Right), false, false)
         } else if parser.consume(&Token::Full) {
             parser.consume(&Token::Outer);
             parser.expect(&Token::Join)?;
-            (Some(JoinType::Full), false)
+            (Some(JoinType::Full), false, false)
         } else if parser.consume(&Token::Join) {
-            (Some(JoinType::Inner), false)  // Implicit INNER
+            (Some(JoinType::Inner), false, false)  // Implicit INNER
+        } else if parser.consume(&Token::Comma) {
+            // Comma join (implicit cross join): FROM a, b
+            (Some(JoinType::Cross), false, true)
         } else {
-            (None, false)
+            (None, false, false)
         };
 
         if let Some(join_type) = join_type {
             let table = parse_table_reference(parser)?;
 
-            let condition = if join_type != JoinType::Cross && parser.consume(&Token::On) {
+            // Comma joins and CROSS JOINs don't have ON clause
+            let condition = if join_type != JoinType::Cross && !is_comma_join && parser.consume(&Token::On) {
                 Some(parse_expression(parser)?)
             } else {
                 None
@@ -399,6 +473,7 @@ fn parse_join_clauses(parser: &mut Parser) -> Result<Vec<JoinClause>> {
                 table,
                 condition,
                 explicit_inner,
+                is_comma_join,
             });
         } else {
             break;
