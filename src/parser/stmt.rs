@@ -112,6 +112,20 @@ pub fn parse_select_statement(parser: &mut Parser) -> Result<SelectStatement> {
     // JOIN clauses
     let joins = parse_join_clauses(parser)?;
 
+    // PIVOT/UNPIVOT at SELECT level (after JOINs)
+    // When there are JOINs, PIVOT/UNPIVOT applies to the entire result
+    let (pivot, unpivot) = if !joins.is_empty() {
+        let p = parse_pivot_clause(parser)?;
+        let u = if p.is_none() { parse_unpivot_clause(parser)? } else { None };
+        (p, u)
+    } else {
+        // Without JOINs, PIVOT/UNPIVOT might be in the table reference already,
+        // but we also try SELECT-level for consistency
+        let p = parse_pivot_clause(parser)?;
+        let u = if p.is_none() { parse_unpivot_clause(parser)? } else { None };
+        (p, u)
+    };
+
     // WHERE clause
     let where_clause = if parser.consume(&Token::Where) {
         // WHERE without FROM is invalid (semantically meaningless)
@@ -204,6 +218,8 @@ pub fn parse_select_statement(parser: &mut Parser) -> Result<SelectStatement> {
         columns,
         from,
         joins,
+        pivot,
+        unpivot,
         where_clause,
         group_by,
         having,
@@ -347,11 +363,24 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     // Table name
     let name = parse_qualified_table_name(parser)?;
 
-    // Optional alias
+    // Optional alias (before SAMPLE/PIVOT)
     let alias = parse_optional_alias(parser);
 
     // Parse optional SAMPLE/TABLESAMPLE clause
     let sample = parse_sample_clause(parser)?;
+
+    // Parse optional PIVOT clause
+    let pivot = parse_pivot_clause(parser)?;
+
+    // Parse optional UNPIVOT clause
+    let unpivot = parse_unpivot_clause(parser)?;
+
+    // Parse optional alias after PIVOT/UNPIVOT
+    let alias = if (pivot.is_some() || unpivot.is_some()) && alias.is_none() {
+        parse_optional_alias(parser)
+    } else {
+        alias
+    };
 
     Ok(TableReference::Table {
         name,
@@ -359,8 +388,8 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         time_travel: None,
         changes: None,
         sample,
-        pivot: None,
-        unpivot: None,
+        pivot,
+        unpivot,
         match_recognize: None,
     })
 }
@@ -430,6 +459,125 @@ fn parse_sample_clause(parser: &mut Parser) -> Result<Option<SampleClause>> {
     };
 
     Ok(Some(SampleClause { method, size, seed, tablesample }))
+}
+
+/// Parse optional PIVOT clause
+fn parse_pivot_clause(parser: &mut Parser) -> Result<Option<PivotClause>> {
+    // PIVOT (aggregate_func FOR column IN (value1, value2, ...))
+    if !parser.consume(&Token::Pivot) {
+        return Ok(None);
+    }
+
+    parser.expect(&Token::LParen)?;
+
+    // Parse aggregate function(s)
+    let mut aggregate_functions = Vec::new();
+    loop {
+        let agg_expr = parse_expression(parser)?;
+        let alias = parse_optional_alias(parser);
+        aggregate_functions.push((agg_expr, alias));
+
+        if !parser.consume(&Token::Comma) {
+            break;
+        }
+    }
+
+    // FOR column
+    parser.expect(&Token::For)?;
+    let for_column = parse_qualified_identifier(parser)?;
+
+    // IN (value1, value2, ...)
+    parser.expect(&Token::In)?;
+    parser.expect(&Token::LParen)?;
+
+    let mut in_values = Vec::new();
+    loop {
+        let value_expr = parse_expression(parser)?;
+        let alias = if parser.consume(&Token::As) {
+            Some(parse_identifier(parser)?)
+        } else {
+            None
+        };
+        in_values.push((value_expr, alias));
+
+        if !parser.consume(&Token::Comma) {
+            break;
+        }
+    }
+
+    parser.expect(&Token::RParen)?;  // Close IN list
+    parser.expect(&Token::RParen)?;  // Close PIVOT
+
+    // Parse optional alias after PIVOT
+    let alias = parse_optional_alias(parser);
+
+    Ok(Some(PivotClause {
+        aggregate_functions,
+        for_column,
+        in_values,
+        alias,
+    }))
+}
+
+/// Parse optional UNPIVOT clause
+fn parse_unpivot_clause(parser: &mut Parser) -> Result<Option<UnpivotClause>> {
+    // UNPIVOT [INCLUDE NULLS] (value_column FOR name_column IN (col1, col2, ...))
+    if !parser.consume(&Token::Unpivot) {
+        return Ok(None);
+    }
+
+    // Optional INCLUDE NULLS
+    let include_nulls = if parser.consume(&Token::Include) {
+        parser.expect(&Token::Nulls)?;
+        true
+    } else {
+        false
+    };
+
+    parser.expect(&Token::LParen)?;
+
+    // value_column
+    let value_column = parse_identifier(parser)?;
+
+    // FOR name_column
+    parser.expect(&Token::For)?;
+    let name_column = parse_identifier(parser)?;
+
+    // IN (col1, col2, ...)
+    parser.expect(&Token::In)?;
+    parser.expect(&Token::LParen)?;
+
+    let mut columns = Vec::new();
+    loop {
+        columns.push(parse_identifier(parser)?);
+        if !parser.consume(&Token::Comma) {
+            break;
+        }
+    }
+
+    parser.expect(&Token::RParen)?;  // Close IN list
+    parser.expect(&Token::RParen)?;  // Close UNPIVOT
+
+    // Parse optional alias after UNPIVOT
+    let alias = parse_optional_alias(parser);
+
+    Ok(Some(UnpivotClause {
+        value_column,
+        name_column,
+        columns,
+        include_nulls,
+        alias,
+    }))
+}
+
+/// Parse a qualified identifier (potentially with dots)
+fn parse_qualified_identifier(parser: &mut Parser) -> Result<String> {
+    let mut ident = parse_identifier(parser)?;
+    while parser.consume(&Token::Dot) {
+        ident.push('.');
+        ident.push_str(&parse_identifier(parser)?);
+    }
+    Ok(ident)
 }
 
 /// Parse qualified table name (schema.table)

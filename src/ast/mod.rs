@@ -26,6 +26,8 @@ pub struct SelectStatement {
     pub columns: Vec<SelectColumn>,
     pub from: Option<FromClause>,
     pub joins: Vec<JoinClause>,
+    pub pivot: Option<PivotClause>,
+    pub unpivot: Option<UnpivotClause>,
     pub where_clause: Option<WhereClause>,
     pub group_by: Option<GroupByClause>,
     pub having: Option<HavingClause>,
@@ -535,6 +537,7 @@ pub struct PivotClause {
     pub aggregate_functions: Vec<(Expression, Option<String>)>,  // (expr, alias)
     pub for_column: String,
     pub in_values: Vec<(Expression, Option<String>)>,  // (value, alias)
+    pub alias: Option<String>,  // Optional table alias after PIVOT
 }
 
 /// UNPIVOT clause (Snowflake-specific)
@@ -544,6 +547,7 @@ pub struct UnpivotClause {
     pub name_column: String,
     pub columns: Vec<String>,
     pub include_nulls: bool,
+    pub alias: Option<String>,  // Optional table alias after UNPIVOT
 }
 
 /// SAMPLE/TABLESAMPLE clause

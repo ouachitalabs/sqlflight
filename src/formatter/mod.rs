@@ -542,6 +542,13 @@ impl Formatter {
             matches!(&from.table, TableReference::Table { sample: Some(_), .. })
         });
 
+        // Check if SELECT or table reference has PIVOT/UNPIVOT
+        let has_pivot_unpivot = stmt.pivot.is_some() || stmt.unpivot.is_some()
+            || stmt.from.as_ref().map_or(false, |from| {
+                matches!(&from.table, TableReference::Table { pivot: Some(_), .. }
+                    | TableReference::Table { unpivot: Some(_), .. })
+            });
+
         // Can only inline if: no other clauses except simple WHERE with named columns
         // Note: UNION doesn't force FROM to newline, each SELECT in UNION formats independently
         let has_extra_clauses = stmt.group_by.is_some()
@@ -570,11 +577,12 @@ impl Formatter {
             && !self.in_subquery;  // Never simple when inside a subquery
 
         // FROM should be on new line if: vertical columns, has star with WHERE/JOINs, has extra clauses,
-        // we're inside a subquery, or there's a SAMPLE clause
+        // we're inside a subquery, there's a SAMPLE clause, or there's PIVOT/UNPIVOT
         let force_from_newline = !columns_inline
             || (has_star && (stmt.where_clause.is_some() || !stmt.joins.is_empty()))
             || has_extra_clauses
             || has_sample
+            || has_pivot_unpivot
             || self.in_subquery;
 
         // FROM clause
@@ -591,6 +599,18 @@ impl Formatter {
         for join in &stmt.joins {
             self.printer.newline();
             self.format_join(join);
+        }
+
+        // PIVOT (SELECT-level, after JOINs)
+        if let Some(pivot) = &stmt.pivot {
+            self.printer.newline();
+            self.format_pivot(pivot);
+        }
+
+        // UNPIVOT (SELECT-level, after JOINs)
+        if let Some(unpivot) = &stmt.unpivot {
+            self.printer.newline();
+            self.format_unpivot(unpivot);
         }
 
         // WHERE clause
@@ -881,16 +901,37 @@ impl Formatter {
 
     fn format_table_reference(&mut self, table: &TableReference) {
         match table {
-            TableReference::Table { name, alias, sample, .. } => {
+            TableReference::Table { name, alias, sample, pivot, unpivot, .. } => {
                 self.printer.write(&format_identifier(name));
-                if let Some(a) = alias {
-                    self.printer.write(" ");
-                    self.printer.write(&format_identifier(a));
+                // Note: alias is printed after PIVOT/UNPIVOT if they exist
+                let has_pivot_unpivot = pivot.is_some() || unpivot.is_some();
+                if !has_pivot_unpivot {
+                    if let Some(a) = alias {
+                        self.printer.write(" ");
+                        self.printer.write(&format_identifier(a));
+                    }
                 }
                 // Format SAMPLE clause
                 if let Some(sample) = sample {
                     self.printer.newline();
                     self.format_sample(sample);
+                }
+                // Format PIVOT clause
+                if let Some(pivot) = pivot {
+                    self.printer.newline();
+                    self.format_pivot(pivot);
+                }
+                // Format UNPIVOT clause
+                if let Some(unpivot) = unpivot {
+                    self.printer.newline();
+                    self.format_unpivot(unpivot);
+                }
+                // Alias after PIVOT/UNPIVOT
+                if has_pivot_unpivot {
+                    if let Some(a) = alias {
+                        self.printer.write(" ");
+                        self.printer.write(&format_identifier(a));
+                    }
                 }
             }
             TableReference::Subquery { query, alias, explicit_as } => {
@@ -997,6 +1038,90 @@ impl Formatter {
         // Format seed if present
         if let Some(seed) = sample.seed {
             self.printer.write(&format!(" seed ({})", seed));
+        }
+    }
+
+    fn format_pivot(&mut self, pivot: &PivotClause) {
+        self.printer.write("pivot (");
+        self.printer.indent();
+        self.printer.newline();
+
+        // Format aggregate function(s) with leading comma style for multiple
+        for (i, (agg_expr, alias)) in pivot.aggregate_functions.iter().enumerate() {
+            if i > 0 {
+                self.printer.newline();
+                self.printer.write(", ");
+            }
+            self.format_expression(agg_expr);
+            if let Some(a) = alias {
+                self.printer.write(" as ");
+                self.printer.write(&format_identifier(a));
+            }
+        }
+
+        self.printer.newline();
+        self.printer.write("for ");
+        self.printer.write(&format_identifier(&pivot.for_column));
+        self.printer.write(" in (");
+
+        // Format IN values
+        for (i, (value_expr, alias)) in pivot.in_values.iter().enumerate() {
+            if i > 0 {
+                self.printer.write(", ");
+            }
+            self.format_expression(value_expr);
+            if let Some(a) = alias {
+                self.printer.write(" as ");
+                self.printer.write(&format_identifier(a));
+            }
+        }
+        self.printer.write(")");
+
+        self.printer.dedent();
+        self.printer.newline();
+        self.printer.write(")");
+
+        // Output alias if present
+        if let Some(a) = &pivot.alias {
+            self.printer.write(" ");
+            self.printer.write(&format_identifier(a));
+        }
+    }
+
+    fn format_unpivot(&mut self, unpivot: &UnpivotClause) {
+        self.printer.write("unpivot");
+        if unpivot.include_nulls {
+            self.printer.write(" include nulls");
+        }
+        self.printer.write(" (");
+        self.printer.indent();
+        self.printer.newline();
+
+        // Format value column
+        self.printer.write(&format_identifier(&unpivot.value_column));
+
+        self.printer.newline();
+        self.printer.write("for ");
+        self.printer.write(&format_identifier(&unpivot.name_column));
+        self.printer.write(" in (");
+
+        // Format columns
+        for (i, col) in unpivot.columns.iter().enumerate() {
+            if i > 0 {
+                self.printer.write(", ");
+            }
+            self.printer.write(&format_identifier(col));
+        }
+        self.printer.write(")");
+
+        self.printer.dedent();
+        self.printer.newline();
+        self.printer.write(")");
+
+        // Output alias if present
+        if let Some(a) = &unpivot.alias {
+            self.printer.write(" ");
+            self.printer.write(&format_identifier(a));
         }
     }
 
