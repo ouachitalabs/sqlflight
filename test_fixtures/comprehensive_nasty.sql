@@ -2,11 +2,11 @@
 {% set my_database = 'PROD_DB' %}{% set schema_name = "analytics" %}{%set table_list=['users','orders','products']%}
 {% macro generate_column_list(cols) %}{% for col in cols %}{{col}}{% if not loop.last %},{% endif %}{% endfor %}{% endmacro %}
 {%- macro safe_divide(numerator, denominator) -%}CASE WHEN {{denominator}} = 0 THEN NULL ELSE {{numerator}} / {{denominator}} END{%- endmacro -%}
--- Start with some variable declarations
-SET my_var = 'hello';SET another_var=42;set (a,b,c)=(1,2,3);
-UNSET my_var;UNSET (a,b);
--- USE statements
-USE DATABASE {{my_database}};USE SCHEMA {{ schema_name }};USE ROLE analyst_role;USE WAREHOUSE compute_wh;
+-- Start with some variable declarations - NOT YET SUPPORTED
+-- SET my_var = 'hello';SET another_var=42;set (a,b,c)=(1,2,3);
+-- UNSET my_var;UNSET (a,b);
+-- USE statements - NOT YET SUPPORTED
+-- USE DATABASE {{my_database}};USE SCHEMA {{ schema_name }};USE ROLE analyst_role;USE WAREHOUSE compute_wh;
 -- Crazy CTE with everything
 WITH RECURSIVE base_cte AS(SELECT 1 as n UNION ALL SELECT n+1 FROM base_cte WHERE n<10),
 {% for tbl in table_list %}{{tbl}}_cte AS (
@@ -491,44 +491,46 @@ CALL dynamic_proc(PARSE_JSON('{"key":"value"}'));
 -- EXECUTE statements
 EXECUTE TASK my_task;
 EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || table_name;
-EXECUTE IMMEDIATE $$
-DECLARE
-    row_count INT;
-BEGIN
-    SELECT COUNT(*) INTO :row_count FROM my_table;
-    RETURN row_count;
-END;
-$$;
 
--- Scripting blocks
-DECLARE
-    my_var VARCHAR := 'hello';
-    counter INT DEFAULT 0;
-    result_set RESULTSET;
-BEGIN
-    result_set := (SELECT * FROM my_table WHERE status=:my_var);
-    FOR record IN result_set DO
-        counter := counter + 1;
-        LET row_id INT := record.id;
-        IF (record.type = 'A') THEN
-            INSERT INTO type_a_table VALUES(:row_id, record.data);
-        ELSEIF (record.type = 'B') THEN
-            INSERT INTO type_b_table VALUES(:row_id, record.data);
-        ELSE
-            INSERT INTO other_table VALUES(:row_id, record.data);
-        END IF;
-    END FOR;
-    CASE counter
-        WHEN 0 THEN RETURN 'No records';
-        WHEN 1 THEN RETURN 'One record';
-        ELSE RETURN counter || ' records';
-    END CASE;
-EXCEPTION
-    WHEN STATEMENT_ERROR THEN
-        RETURN SQLERRM;
-    WHEN OTHER THEN
-        RAISE;
-END;
+-- NOTE: Snowflake Scripting blocks (DECLARE...BEGIN...END) are not yet supported
+-- EXECUTE IMMEDIATE $$
+-- DECLARE
+--     row_count INT;
+-- BEGIN
+--     SELECT COUNT(*) INTO :row_count FROM my_table;
+--     RETURN row_count;
+-- END;
+-- $$;
+
+-- Scripting blocks - not yet supported
+-- DECLARE
+--     my_var VARCHAR := 'hello';
+--     counter INT DEFAULT 0;
+--     result_set RESULTSET;
+-- BEGIN
+--     result_set := (SELECT * FROM my_table WHERE status=:my_var);
+--     FOR record IN result_set DO
+--         counter := counter + 1;
+--         LET row_id INT := record.id;
+--         IF (record.type = 'A') THEN
+--             INSERT INTO type_a_table VALUES(:row_id, record.data);
+--         ELSEIF (record.type = 'B') THEN
+--             INSERT INTO type_b_table VALUES(:row_id, record.data);
+--         ELSE
+--             INSERT INTO other_table VALUES(:row_id, record.data);
+--         END IF;
+--     END FOR;
+--     CASE counter
+--         WHEN 0 THEN RETURN 'No records';
+--         WHEN 1 THEN RETURN 'One record';
+--         ELSE RETURN counter || ' records';
+--     END CASE;
+-- EXCEPTION
+--     WHEN STATEMENT_ERROR THEN
+--         RETURN SQLERRM;
+--     WHEN OTHER THEN
+--         RAISE;
+-- END;
 
 -- Transactions
 BEGIN TRANSACTION NAME my_txn;

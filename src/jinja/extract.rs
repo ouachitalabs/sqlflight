@@ -74,15 +74,30 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                     placeholders.insert(placeholder.id.clone(), placeholder);
                 }
                 Some('%') => {
-                    // Jinja statement {% ... %}
+                    // Jinja statement {% ... %} or {%- ... -%}
                     chars.next(); // consume %
-                    let content = extract_until(&mut chars, "%}")?;
+                    // Handle optional whitespace control: {%- ... -%}
+                    let starts_with_trim = chars.peek() == Some(&'-');
+                    if starts_with_trim {
+                        chars.next(); // consume leading -
+                    }
+                    let stmt = extract_until_statement_end(&mut chars)?;
 
                     // Check if this is a block-forming statement with raw content
-                    if let Some(end_tag) = is_raw_content_block(&content) {
+                    if let Some(end_tag) = is_raw_content_block(&stmt.content) {
                         // Extract until we find the matching end tag
                         let block_content = extract_block_content(&mut chars, end_tag)?;
-                        let full_original = format!("{{%{}%}}{}{{% {} %}}", content, block_content.content, end_tag);
+                        // Preserve whitespace control markers
+                        let start_marker = if starts_with_trim { "{%-" } else { "{%" };
+                        let end_marker = if stmt.ends_with_trim { "-%}" } else { "%}" };
+                        let end_start = if block_content.end_starts_trim { "{%-" } else { "{%" };
+                        let end_end = if block_content.end_ends_trim { "-%}" } else { "%}" };
+                        let full_original = format!(
+                            "{}{}{}{}{} {} {}",
+                            start_marker, stmt.content, end_marker,
+                            block_content.content,
+                            end_start, end_tag, end_end
+                        );
 
                         let placeholder = JinjaPlaceholder {
                             id: format!("{}{:03}__", PLACEHOLDER_PREFIX, {
@@ -95,7 +110,12 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                         result.push_str(&placeholder.id);
                         placeholders.insert(placeholder.id.clone(), placeholder);
                     } else {
-                        let placeholder = create_placeholder(&mut counter, content, JinjaKind::Statement);
+                        let placeholder = create_placeholder_with_trim(
+                            &mut counter,
+                            stmt.content,
+                            starts_with_trim,
+                            stmt.ends_with_trim,
+                        );
                         result.push_str(&placeholder.id);
                         placeholders.insert(placeholder.id.clone(), placeholder);
                     }
@@ -123,9 +143,11 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
 /// Block content result
 struct BlockContent {
     content: String,
+    end_starts_trim: bool,  // true if end tag started with {%-
+    end_ends_trim: bool,    // true if end tag ended with -%}
 }
 
-/// Extract content until we find the matching end tag {% endXXX %}
+/// Extract content until we find the matching end tag {% endXXX %} or {%- endXXX -%}
 fn extract_block_content(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     end_tag: &str,
@@ -142,20 +164,38 @@ fn extract_block_content(
                     chars.next();
                     content.push('%');
 
-                    // Extract the statement content
-                    let stmt_content = extract_until(chars, "%}")?;
-                    let trimmed = stmt_content.trim();
+                    // Handle optional whitespace trim marker {%-
+                    let has_trim = chars.peek() == Some(&'-');
+                    if has_trim {
+                        chars.next();
+                        content.push('-');
+                    }
+
+                    // Extract the statement content (handles both %} and -%})
+                    let stmt = extract_until_statement_end(chars)?;
+                    let trimmed = stmt.content.trim();
 
                     if trimmed == end_tag {
-                        // Found the end tag! Remove the partial "{% " we added and return
-                        // We need to remove the "{%" from content
+                        // Found the end tag! Remove the partial "{%" or "{%-" we added and return
+                        if has_trim {
+                            content.pop(); // remove '-'
+                        }
                         content.pop(); // remove '%'
                         content.pop(); // remove '{'
-                        return Ok(BlockContent { content });
+                        return Ok(BlockContent {
+                            content,
+                            end_starts_trim: has_trim,
+                            end_ends_trim: stmt.ends_with_trim,
+                        });
                     } else {
                         // Not our end tag, include it in content
-                        content.push_str(&stmt_content);
-                        content.push_str("%}");
+                        content.push_str(&stmt.content);
+                        // Preserve the original closing marker
+                        if stmt.ends_with_trim {
+                            content.push_str("-%}");
+                        } else {
+                            content.push_str("%}");
+                        }
                     }
                 }
             }
@@ -192,6 +232,50 @@ fn extract_until(
     })
 }
 
+/// Result of extracting statement content
+struct StatementContent {
+    content: String,
+    ends_with_trim: bool,  // true if ended with -%}
+}
+
+/// Extract statement content, handling both %} and -%} endings
+fn extract_until_statement_end(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) -> Result<StatementContent> {
+    let mut content = String::new();
+
+    while let Some(&c) = chars.peek() {
+        // Check for -%} or %}
+        if c == '-' {
+            let mut lookahead = chars.clone();
+            lookahead.next(); // consume -
+            if lookahead.next() == Some('%') && lookahead.next() == Some('}') {
+                // Found -%}, consume and return
+                chars.next(); // -
+                chars.next(); // %
+                chars.next(); // }
+                return Ok(StatementContent { content, ends_with_trim: true });
+            }
+        } else if c == '%' {
+            let mut lookahead = chars.clone();
+            lookahead.next(); // consume %
+            if lookahead.next() == Some('}') {
+                // Found %}, consume and return
+                chars.next(); // %
+                chars.next(); // }
+                return Ok(StatementContent { content, ends_with_trim: false });
+            }
+        }
+
+        content.push(c);
+        chars.next();
+    }
+
+    Err(crate::Error::JinjaError {
+        message: "Unclosed Jinja statement, expected %} or -%}".to_string(),
+    })
+}
+
 fn create_placeholder(counter: &mut usize, content: String, kind: JinjaKind) -> JinjaPlaceholder {
     *counter += 1;
     let id = format!("{}{:03}__", PLACEHOLDER_PREFIX, counter);
@@ -200,5 +284,29 @@ fn create_placeholder(counter: &mut usize, content: String, kind: JinjaKind) -> 
         JinjaKind::Statement => format!("{{%{}%}}", content),
         JinjaKind::Comment => format!("{{#{}#}}", content),
     };
-    JinjaPlaceholder { id, original, kind }
+    JinjaPlaceholder {
+        id,
+        original,
+        kind,
+    }
 }
+
+/// Create a placeholder for a Jinja statement with whitespace control markers
+fn create_placeholder_with_trim(
+    counter: &mut usize,
+    content: String,
+    starts_with_trim: bool,
+    ends_with_trim: bool,
+) -> JinjaPlaceholder {
+    *counter += 1;
+    let id = format!("{}{:03}__", PLACEHOLDER_PREFIX, counter);
+    let start = if starts_with_trim { "{%-" } else { "{%" };
+    let end = if ends_with_trim { "-%}" } else { "%}" };
+    let original = format!("{}{}{}", start, content, end);
+    JinjaPlaceholder {
+        id,
+        original,
+        kind: JinjaKind::Statement,
+    }
+}
+
