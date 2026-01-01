@@ -617,6 +617,11 @@ fn is_row_pattern_modifier(name: &str) -> bool {
     upper == "FINAL" || upper == "RUNNING"
 }
 
+/// Check if this is a prefix operator like CONNECT_BY_ROOT
+fn is_prefix_operator(name: &str) -> bool {
+    name.eq_ignore_ascii_case("CONNECT_BY_ROOT")
+}
+
 /// Check if current token starts a function (identifier followed by '(' or keyword function)
 fn is_function_start(parser: &Parser) -> bool {
     match parser.current() {
@@ -709,6 +714,15 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
                 Ok(Expression::RowPatternModifier {
                     modifier: name.to_uppercase(),
                     expr: Box::new(inner_expr),
+                })
+            } else if is_prefix_operator(&name) {
+                // Prefix operators like CONNECT_BY_ROOT that take an expression
+                let inner_expr = parse_primary_expression(parser)?;
+                Ok(Expression::FunctionCall {
+                    name: name.to_uppercase(),
+                    args: vec![inner_expr],
+                    within_group: None,
+                    over: None,
                 })
             } else {
                 Ok(Expression::Identifier(name))
