@@ -687,6 +687,9 @@ impl Formatter {
 
     fn format_with_clause(&mut self, with: &WithClause) {
         self.printer.write("with ");
+        if with.recursive {
+            self.printer.write("recursive ");
+        }
 
         for (i, cte) in with.ctes.iter().enumerate() {
             if i > 0 {

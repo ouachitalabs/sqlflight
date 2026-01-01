@@ -44,6 +44,9 @@ pub fn parse_statement(parser: &mut Parser) -> Result<Statement> {
 fn parse_with_statement(parser: &mut Parser) -> Result<Statement> {
     parser.expect(&Token::With)?;
 
+    // Optional RECURSIVE keyword
+    let recursive = parser.consume(&Token::Recursive);
+
     let mut ctes = Vec::new();
 
     loop {
@@ -57,7 +60,7 @@ fn parse_with_statement(parser: &mut Parser) -> Result<Statement> {
 
     // Now parse the main SELECT
     let mut select = parse_select_statement(parser)?;
-    select.with_clause = Some(WithClause { ctes });
+    select.with_clause = Some(WithClause { recursive, ctes });
 
     Ok(Statement::Select(select))
 }
@@ -1705,6 +1708,7 @@ fn keyword_to_identifier(token: &Token) -> Option<String> {
         Token::Right => Some("right".to_string()),
         Token::Full => Some("full".to_string()),
         Token::Cross => Some("cross".to_string()),
+        Token::Recursive => Some("recursive".to_string()),
         Token::Partition => Some("partition".to_string()),
         Token::Order => Some("order".to_string()),
         Token::By => Some("by".to_string()),

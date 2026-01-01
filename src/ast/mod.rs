@@ -42,6 +42,7 @@ pub struct SelectStatement {
 /// WITH clause (CTEs)
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithClause {
+    pub recursive: bool,
     pub ctes: Vec<CommonTableExpression>,
 }
 

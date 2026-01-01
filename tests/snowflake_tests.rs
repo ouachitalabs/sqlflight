@@ -1257,3 +1257,31 @@ where a is not distinct from b",
         assert_idempotent("SELECT * FROM t WHERE a IS TRUE AND b IS NOT DISTINCT FROM c");
     }
 }
+
+// =============================================================================
+// WITH RECURSIVE - Recursive common table expressions
+// =============================================================================
+
+mod with_recursive {
+    use super::*;
+
+    #[test]
+    fn simple_recursive_cte() {
+        assert_formats_to(
+            "WITH RECURSIVE cte AS (SELECT 1 n UNION ALL SELECT n+1 FROM cte WHERE n<10) SELECT * FROM cte",
+            "with recursive cte as (
+  select 1 n
+  union all
+  select n + 1
+  from cte
+  where n < 10
+)
+select * from cte",
+        );
+    }
+
+    #[test]
+    fn recursive_cte_idempotent() {
+        assert_idempotent("WITH RECURSIVE nums AS (SELECT 1 n UNION ALL SELECT n+1 FROM nums WHERE n<5) SELECT * FROM nums");
+    }
+}
