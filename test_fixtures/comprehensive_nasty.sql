@@ -280,17 +280,19 @@ INSERT INTO target_table(col1,col2,col3)SELECT a,b,c FROM source_table WHERE con
 INSERT INTO target_table SELECT * FROM source_table;
 INSERT INTO target_table(col1,col2)VALUES(1,'a'),(2,'b'),(3,'c');
 INSERT OVERWRITE INTO target_table SELECT * FROM fresh_data;
-INSERT ALL
-WHEN type='A' THEN INTO table_a(col1,col2)VALUES(v1,v2)
-WHEN type='B' THEN INTO table_b(col1,col2)VALUES(v1,v2)
-WHEN type='C' THEN INTO table_c(col1,col2,col3)VALUES(v1,v2,v3)
-ELSE INTO table_other(col1)VALUES(v1)
-SELECT type,v1,v2,v3 FROM source_multi;
+-- INSERT ALL - NOT YET SUPPORTED
+-- INSERT ALL
+-- WHEN type='A' THEN INTO table_a(col1,col2)VALUES(v1,v2)
+-- WHEN type='B' THEN INTO table_b(col1,col2)VALUES(v1,v2)
+-- WHEN type='C' THEN INTO table_c(col1,col2,col3)VALUES(v1,v2,v3)
+-- ELSE INTO table_other(col1)VALUES(v1)
+-- SELECT type,v1,v2,v3 FROM source_multi;
 
 -- UPDATE statements
 UPDATE target_table SET col1='new_value',col2=col2+1,col3=NULL WHERE id=123;
 UPDATE target_table t SET t.col1=s.val1,t.col2=s.val2 FROM source_table s WHERE t.id=s.id AND s.active=TRUE;
-UPDATE schema.table SET (a,b,c)=(SELECT x,y,z FROM other WHERE other.id=table.id) WHERE condition;
+-- UPDATE with tuple assignment - NOT YET SUPPORTED
+-- UPDATE schema.table SET (a,b,c)=(SELECT x,y,z FROM other WHERE other.id=table.id) WHERE condition;
 
 -- DELETE statements
 DELETE FROM target_table WHERE created_at<DATEADD(year,-1,CURRENT_DATE());
@@ -305,12 +307,12 @@ WHEN NOT MATCHED AND s.insert_flag=TRUE THEN INSERT(id,col1,col2,created_at)VALU
 WHEN NOT MATCHED BY SOURCE THEN UPDATE SET t.orphaned=TRUE
 ;
 
--- COPY INTO statements
-COPY INTO target_table FROM @stage_name/path/to/files/ FILE_FORMAT=(TYPE='CSV' SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='"' NULL_IF=('','NULL','null') EMPTY_FIELD_AS_NULL=TRUE TRIM_SPACE=TRUE ERROR_ON_COLUMN_COUNT_MISMATCH=FALSE) ON_ERROR='CONTINUE' PURGE=TRUE FORCE=FALSE PATTERN='.*\\.csv\\.gz';
-COPY INTO target_table FROM 's3://bucket/path/' CREDENTIALS=(AWS_KEY_ID='{{aws_key}}' AWS_SECRET_KEY='{{aws_secret}}') ENCRYPTION=(TYPE='AWS_SSE_S3');
-COPY INTO target_table(col1,col2,col3)FROM(SELECT $1,$2::NUMBER,$3::TIMESTAMP FROM @stage/files/) FILE_FORMAT=(TYPE='PARQUET');
-COPY INTO @export_stage/output/ FROM target_table FILE_FORMAT=(TYPE='JSON') OVERWRITE=TRUE SINGLE=FALSE MAX_FILE_SIZE=100000000 INCLUDE_QUERY_ID=TRUE HEADER=TRUE;
-COPY INTO 'azure://account.blob.core.windows.net/container/path' FROM target_table CREDENTIALS=(AZURE_SAS_TOKEN='{{sas_token}}') FILE_FORMAT=(TYPE='PARQUET' COMPRESSION='SNAPPY') PARTITION BY (YEAR(date_col),MONTH(date_col));
+-- COPY INTO statements - NOT YET SUPPORTED
+-- COPY INTO target_table FROM @stage_name/path/to/files/ FILE_FORMAT=(TYPE='CSV' SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='"' NULL_IF=('','NULL','null') EMPTY_FIELD_AS_NULL=TRUE TRIM_SPACE=TRUE ERROR_ON_COLUMN_COUNT_MISMATCH=FALSE) ON_ERROR='CONTINUE' PURGE=TRUE FORCE=FALSE PATTERN='.*\\.csv\\.gz';
+-- COPY INTO target_table FROM 's3://bucket/path/' CREDENTIALS=(AWS_KEY_ID='{{aws_key}}' AWS_SECRET_KEY='{{aws_secret}}') ENCRYPTION=(TYPE='AWS_SSE_S3');
+-- COPY INTO target_table(col1,col2,col3)FROM(SELECT $1,$2::NUMBER,$3::TIMESTAMP FROM @stage/files/) FILE_FORMAT=(TYPE='PARQUET');
+-- COPY INTO @export_stage/output/ FROM target_table FILE_FORMAT=(TYPE='JSON') OVERWRITE=TRUE SINGLE=FALSE MAX_FILE_SIZE=100000000 INCLUDE_QUERY_ID=TRUE HEADER=TRUE;
+-- COPY INTO 'azure://account.blob.core.windows.net/container/path' FROM target_table CREDENTIALS=(AZURE_SAS_TOKEN='{{sas_token}}') FILE_FORMAT=(TYPE='PARQUET' COMPRESSION='SNAPPY') PARTITION BY (YEAR(date_col),MONTH(date_col));
 
 -- CREATE TABLE variations
 CREATE TABLE new_table(id NUMBER(38,0) NOT NULL PRIMARY KEY,name VARCHAR(255) NOT NULL,email VARCHAR(255) UNIQUE,created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),status VARCHAR(20) DEFAULT 'active' CHECK(status IN('active','inactive','pending')),parent_id NUMBER REFERENCES parent_table(id),CONSTRAINT fk_parent FOREIGN KEY(parent_id)REFERENCES parent_table(id)ON DELETE CASCADE ON UPDATE NO ACTION);

@@ -31,11 +31,59 @@ pub fn format_sql(input: &str) -> Result<String> {
     if !has_real_tokens {
         return Ok(jinja::reintegrate_jinja(input, &placeholders));
     }
-    let mut parser = Parser::new(&tokenize_result.tokens);
-    let ast = stmt::parse_statement(&mut parser)?;
 
-    // Step 5: Format AST
-    let formatted = format_ast(&ast)?;
+    // Parse ALL statements (not just the first one)
+    // Track which statements had trailing semicolons
+    let mut parser = Parser::new(&tokenize_result.tokens);
+    let mut statements = Vec::new();
+    let mut had_semicolons = Vec::new();
+
+    while !parser.is_eof() {
+        // Skip any leading semicolons
+        while parser.check(&crate::parser::lexer::Token::Semicolon) {
+            parser.advance();
+        }
+
+        if parser.is_eof() {
+            break;
+        }
+
+        let ast = stmt::parse_statement(&mut parser)?;
+        statements.push(ast);
+
+        // Consume optional trailing semicolon and track it
+        let had_semi = parser.check(&crate::parser::lexer::Token::Semicolon);
+        if had_semi {
+            parser.advance();
+        }
+        had_semicolons.push(had_semi);
+    }
+
+    // Step 5: Format all ASTs
+    let mut formatted_parts = Vec::new();
+    for (i, ast) in statements.iter().enumerate() {
+        let mut formatted = format_ast(ast)?;
+        // Add semicolon if the original had one and the statement doesn't already end with one
+        // (SELECT statements handle their own semicolons via stmt.semicolon field)
+        if had_semicolons.get(i).copied().unwrap_or(false) {
+            let trimmed = formatted.trim_end();
+            if !trimmed.ends_with(';') {
+                formatted = format!("{};\n", trimmed);
+            }
+        }
+        formatted_parts.push(formatted);
+    }
+
+    // Join statements with blank lines between them
+    // Each statement already has its own trailing semicolon if it had one in the original
+    let formatted = if formatted_parts.len() == 1 {
+        formatted_parts.into_iter().next().unwrap()
+    } else {
+        formatted_parts.iter()
+            .map(|s| s.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n\n") + "\n"
+    };
 
     // Step 6: Interleave comments
     let with_comments = interleave_comments(&jinja_info.body, &formatted, &comments);
