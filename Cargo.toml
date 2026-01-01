@@ -2,10 +2,11 @@
 name = "sqlflight"
 version = "0.1.0"
 edition = "2024"
+authors = ["John McCrary <john@ouachitalabs.com>"]
 description = "A fast, opinionated SQL formatter for Snowflake with first-class Jinja support"
 keywords = ["sql", "formatter", "snowflake", "jinja", "dbt"]
 categories = ["command-line-utilities", "development-tools"]
-license = "MIT"
+license = "GPL-2.0"
 rust-version = "1.85"
 
 [dependencies]
