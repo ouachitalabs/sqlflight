@@ -542,11 +542,12 @@ impl Formatter {
             matches!(&from.table, TableReference::Table { sample: Some(_), .. })
         });
 
-        // Check if SELECT or table reference has PIVOT/UNPIVOT
+        // Check if SELECT or table reference has PIVOT/UNPIVOT/MATCH_RECOGNIZE
         let has_pivot_unpivot = stmt.pivot.is_some() || stmt.unpivot.is_some()
             || stmt.from.as_ref().map_or(false, |from| {
                 matches!(&from.table, TableReference::Table { pivot: Some(_), .. }
-                    | TableReference::Table { unpivot: Some(_), .. })
+                    | TableReference::Table { unpivot: Some(_), .. }
+                    | TableReference::Table { match_recognize: Some(_), .. })
             });
 
         // Can only inline if: no other clauses except simple WHERE with named columns
@@ -901,11 +902,11 @@ impl Formatter {
 
     fn format_table_reference(&mut self, table: &TableReference) {
         match table {
-            TableReference::Table { name, alias, sample, pivot, unpivot, .. } => {
+            TableReference::Table { name, alias, sample, pivot, unpivot, match_recognize, .. } => {
                 self.printer.write(&format_identifier(name));
-                // Note: alias is printed after PIVOT/UNPIVOT if they exist
-                let has_pivot_unpivot = pivot.is_some() || unpivot.is_some();
-                if !has_pivot_unpivot {
+                // Note: alias is printed after PIVOT/UNPIVOT/MATCH_RECOGNIZE if they exist
+                let has_special_clause = pivot.is_some() || unpivot.is_some() || match_recognize.is_some();
+                if !has_special_clause {
                     if let Some(a) = alias {
                         self.printer.write(" ");
                         self.printer.write(&format_identifier(a));
@@ -926,8 +927,13 @@ impl Formatter {
                     self.printer.newline();
                     self.format_unpivot(unpivot);
                 }
-                // Alias after PIVOT/UNPIVOT
-                if has_pivot_unpivot {
+                // Format MATCH_RECOGNIZE clause
+                if let Some(mr) = match_recognize {
+                    self.printer.newline();
+                    self.format_match_recognize(mr);
+                }
+                // Alias after PIVOT/UNPIVOT/MATCH_RECOGNIZE
+                if has_special_clause {
                     if let Some(a) = alias {
                         self.printer.write(" ");
                         self.printer.write(&format_identifier(a));
@@ -1123,6 +1129,105 @@ impl Formatter {
             self.printer.write(" ");
             self.printer.write(&format_identifier(a));
         }
+    }
+
+    fn format_match_recognize(&mut self, mr: &MatchRecognizeClause) {
+        self.printer.write("match_recognize (");
+        self.printer.indent();
+        self.printer.newline();
+
+        // PARTITION BY
+        if let Some(partition_by) = &mr.partition_by {
+            self.printer.write("partition by ");
+            for (i, expr) in partition_by.iter().enumerate() {
+                if i > 0 {
+                    self.printer.write(", ");
+                }
+                self.format_expression(expr);
+            }
+            self.printer.newline();
+        }
+
+        // ORDER BY
+        if let Some(order_by) = &mr.order_by {
+            self.printer.write("order by ");
+            for (i, item) in order_by.iter().enumerate() {
+                if i > 0 {
+                    self.printer.write(", ");
+                }
+                self.format_order_by_item(item);
+            }
+            self.printer.newline();
+        }
+
+        // MEASURES (with leading comma style for multiple)
+        if !mr.measures.is_empty() {
+            self.printer.write("measures");
+            self.printer.indent();
+            self.printer.newline();
+            for (i, (expr, name)) in mr.measures.iter().enumerate() {
+                if i > 0 {
+                    self.printer.newline();
+                    self.printer.write(", ");
+                }
+                self.format_expression(expr);
+                self.printer.write(" as ");
+                self.printer.write(&name.to_lowercase());
+            }
+            self.printer.dedent();
+            self.printer.newline();
+        }
+
+        // ROWS PER MATCH
+        if let Some(rows_per_match) = &mr.rows_per_match {
+            match rows_per_match {
+                RowsPerMatch::OneRow => self.printer.write("one row per match"),
+                RowsPerMatch::AllRows => self.printer.write("all rows per match"),
+            }
+            self.printer.newline();
+        }
+
+        // AFTER MATCH SKIP
+        if let Some(skip) = &mr.after_match_skip {
+            match skip {
+                AfterMatchSkip::PastLastRow => self.printer.write("after match skip past last row"),
+                AfterMatchSkip::ToNextRow => self.printer.write("after match skip to next row"),
+                AfterMatchSkip::ToFirst(name) => {
+                    self.printer.write("after match skip to first ");
+                    self.printer.write(&name.to_lowercase());
+                }
+                AfterMatchSkip::ToLast(name) => {
+                    self.printer.write("after match skip to last ");
+                    self.printer.write(&name.to_lowercase());
+                }
+            }
+            self.printer.newline();
+        }
+
+        // PATTERN
+        self.printer.write("pattern (");
+        self.printer.write(&mr.pattern.to_lowercase());
+        self.printer.write(")");
+        self.printer.newline();
+
+        // DEFINE (with leading comma style for multiple)
+        self.printer.write("define");
+        self.printer.indent();
+        self.printer.newline();
+        for (i, (name, expr)) in mr.define.iter().enumerate() {
+            if i > 0 {
+                self.printer.newline();
+                self.printer.write(", ");
+            }
+            self.printer.write(&name.to_lowercase());
+            self.printer.write(" as ");
+            self.format_expression(expr);
+        }
+        self.printer.dedent();
+
+        self.printer.dedent();
+        self.printer.newline();
+        self.printer.write(")");
     }
 
     fn format_values(&mut self, values: &ValuesClause) {

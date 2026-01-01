@@ -634,6 +634,22 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
             Ok(Expression::Exists { subquery })
         }
 
+        // Keywords that can be used as function names (LAST, FIRST, MATCH_NUMBER, PREV, etc.)
+        Token::Last | Token::First | Token::Match => {
+            let name = match parser.current() {
+                Token::Last => "last",
+                Token::First => "first",
+                Token::Match => "match_number",
+                _ => unreachable!(),
+            }.to_string();
+            parser.advance();
+            if parser.check(&Token::LParen) {
+                parse_function_call(parser, name)
+            } else {
+                Ok(Expression::Identifier(name))
+            }
+        }
+
         _ => Err(crate::Error::ParseError {
             message: format!("Unexpected token: {:?}", parser.current()),
             span: None,

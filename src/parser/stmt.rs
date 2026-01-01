@@ -375,8 +375,11 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     // Parse optional UNPIVOT clause
     let unpivot = parse_unpivot_clause(parser)?;
 
-    // Parse optional alias after PIVOT/UNPIVOT
-    let alias = if (pivot.is_some() || unpivot.is_some()) && alias.is_none() {
+    // Parse optional MATCH_RECOGNIZE clause
+    let match_recognize = parse_match_recognize_clause(parser)?;
+
+    // Parse optional alias after PIVOT/UNPIVOT/MATCH_RECOGNIZE
+    let alias = if (pivot.is_some() || unpivot.is_some() || match_recognize.is_some()) && alias.is_none() {
         parse_optional_alias(parser)
     } else {
         alias
@@ -390,7 +393,7 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         sample,
         pivot,
         unpivot,
-        match_recognize: None,
+        match_recognize,
     })
 }
 
@@ -567,6 +570,186 @@ fn parse_unpivot_clause(parser: &mut Parser) -> Result<Option<UnpivotClause>> {
         columns,
         include_nulls,
         alias,
+    }))
+}
+
+/// Parse optional MATCH_RECOGNIZE clause
+fn parse_match_recognize_clause(parser: &mut Parser) -> Result<Option<MatchRecognizeClause>> {
+    // MATCH_RECOGNIZE (
+    //   [PARTITION BY expr, ...]
+    //   ORDER BY expr, ...
+    //   [MEASURES expr AS name, ...]
+    //   [ONE ROW PER MATCH | ALL ROWS PER MATCH]
+    //   [AFTER MATCH SKIP ...]
+    //   PATTERN (pattern)
+    //   DEFINE name AS expr, ...
+    // )
+    if !parser.consume(&Token::MatchRecognize) {
+        return Ok(None);
+    }
+
+    parser.expect(&Token::LParen)?;
+
+    // Optional PARTITION BY
+    let partition_by = if parser.consume(&Token::Partition) {
+        parser.expect(&Token::By)?;
+        let mut exprs = vec![parse_expression(parser)?];
+        while parser.consume(&Token::Comma) {
+            exprs.push(parse_expression(parser)?);
+        }
+        Some(exprs)
+    } else {
+        None
+    };
+
+    // ORDER BY (required in MATCH_RECOGNIZE)
+    let order_by = if parser.consume(&Token::Order) {
+        parser.expect(&Token::By)?;
+        Some(parse_order_by_items(parser)?)
+    } else {
+        None
+    };
+
+    // Optional MEASURES
+    let measures = if parser.consume(&Token::Measures) {
+        let mut items = Vec::new();
+        loop {
+            let expr = parse_expression(parser)?;
+            parser.expect(&Token::As)?;
+            let name = parse_identifier(parser)?;
+            items.push((expr, name));
+            if !parser.consume(&Token::Comma) {
+                break;
+            }
+        }
+        items
+    } else {
+        Vec::new()
+    };
+
+    // Optional ONE ROW PER MATCH or ALL ROWS PER MATCH
+    let rows_per_match = if parser.consume(&Token::One) {
+        parser.expect(&Token::Row)?;
+        parser.expect(&Token::Per)?;
+        parser.expect(&Token::Match)?;
+        Some(RowsPerMatch::OneRow)
+    } else if parser.consume(&Token::All) {
+        parser.expect(&Token::Rows)?;
+        parser.expect(&Token::Per)?;
+        parser.expect(&Token::Match)?;
+        Some(RowsPerMatch::AllRows)
+    } else {
+        None
+    };
+
+    // Optional AFTER MATCH SKIP
+    let after_match_skip = if parser.consume(&Token::After) {
+        parser.expect(&Token::Match)?;
+        parser.expect(&Token::Skip)?;
+
+        // PAST LAST ROW, TO NEXT ROW, TO FIRST name, TO LAST name
+        if parser.consume(&Token::Past) {
+            parser.expect(&Token::Last)?;
+            parser.expect(&Token::Row)?;
+            Some(AfterMatchSkip::PastLastRow)
+        } else if parser.check(&Token::Identifier("TO".to_string())) {
+            parser.advance();
+            if parser.consume(&Token::Identifier("NEXT".to_string())) {
+                parser.expect(&Token::Row)?;
+                Some(AfterMatchSkip::ToNextRow)
+            } else if parser.consume(&Token::First) {
+                let name = parse_identifier(parser)?;
+                Some(AfterMatchSkip::ToFirst(name))
+            } else if parser.consume(&Token::Last) {
+                let name = parse_identifier(parser)?;
+                Some(AfterMatchSkip::ToLast(name))
+            } else {
+                return Err(crate::Error::ParseError {
+                    message: "Expected NEXT, FIRST, or LAST after SKIP TO".to_string(),
+                    span: None,
+                });
+            }
+        } else {
+            return Err(crate::Error::ParseError {
+                message: "Expected PAST or TO after SKIP".to_string(),
+                span: None,
+            });
+        }
+    } else {
+        None
+    };
+
+    // PATTERN (pattern_string)
+    parser.expect(&Token::Pattern)?;
+    parser.expect(&Token::LParen)?;
+    // Collect pattern tokens until closing paren
+    let mut pattern = String::new();
+    let mut paren_depth = 1;
+    while paren_depth > 0 {
+        match parser.current() {
+            Token::LParen => {
+                pattern.push('(');
+                paren_depth += 1;
+                parser.advance();
+            }
+            Token::RParen => {
+                paren_depth -= 1;
+                if paren_depth > 0 {
+                    pattern.push(')');
+                }
+                parser.advance();
+            }
+            Token::Identifier(s) => {
+                if !pattern.is_empty() && !pattern.ends_with('(') && !pattern.ends_with(' ') {
+                    pattern.push(' ');
+                }
+                pattern.push_str(s);
+                parser.advance();
+            }
+            Token::Star => {
+                pattern.push('*');
+                parser.advance();
+            }
+            Token::Plus => {
+                pattern.push('+');
+                parser.advance();
+            }
+            Token::Eof => {
+                return Err(crate::Error::ParseError {
+                    message: "Unexpected end of input in PATTERN".to_string(),
+                    span: None,
+                });
+            }
+            _ => {
+                // Skip unexpected tokens or add them as-is
+                parser.advance();
+            }
+        }
+    }
+
+    // DEFINE
+    parser.expect(&Token::Define)?;
+    let mut define = Vec::new();
+    loop {
+        let name = parse_identifier(parser)?;
+        parser.expect(&Token::As)?;
+        let expr = parse_expression(parser)?;
+        define.push((name, expr));
+        if !parser.consume(&Token::Comma) {
+            break;
+        }
+    }
+
+    parser.expect(&Token::RParen)?;
+
+    Ok(Some(MatchRecognizeClause {
+        partition_by,
+        order_by,
+        measures,
+        rows_per_match,
+        after_match_skip,
+        pattern,
+        define,
     }))
 }
 
