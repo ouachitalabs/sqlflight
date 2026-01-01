@@ -62,10 +62,10 @@ qualify cnt > 5",
 
     #[test]
     fn qualify_dense_rank() {
+        // select * stays inline, QUALIFY goes on its own line
         assert_formats_to(
             "SELECT * FROM sales QUALIFY DENSE_RANK() OVER (PARTITION BY region ORDER BY amount DESC) = 1",
-            "select *
-from sales
+            "select * from sales
 qualify dense_rank() over (partition by region order by amount desc) = 1",
         );
     }
@@ -889,12 +889,10 @@ where arrays_overlap(tags, array_construct('tag1', 'tag2'))",
 
     #[test]
     fn dateadd_datediff() {
+        // Per spec: 3 or fewer columns that fit within line width → inline
         assert_formats_to(
             "SELECT DATEADD('day', 7, current_date) AS next_week, DATEDIFF('month', start_date, end_date) AS months FROM periods",
-            "select
-  dateadd('day', 7, current_date) as next_week
-  , datediff('month', start_date, end_date) as months
-from periods",
+            "select dateadd('day', 7, current_date) as next_week, datediff('month', start_date, end_date) as months from periods",
         );
     }
 
@@ -916,13 +914,10 @@ from periods",
 
     #[test]
     fn hash_functions() {
+        // Per spec: 3 or fewer columns that fit within line width → inline
         assert_formats_to(
             "SELECT HASH(id) AS id_hash, MD5(email) AS email_hash, SHA2(password, 256) AS pw_hash FROM users",
-            "select
-  hash(id) as id_hash
-  , md5(email) as email_hash
-  , sha2(password, 256) as pw_hash
-from users",
+            "select hash(id) as id_hash, md5(email) as email_hash, sha2(password, 256) as pw_hash from users",
         );
     }
 

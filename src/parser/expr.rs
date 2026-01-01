@@ -453,6 +453,7 @@ fn parse_postfix_expression(parser: &mut Parser) -> Result<Expression> {
                     expr: Box::new(expr),
                     data_type,
                     shorthand: true,  // :: syntax
+                    try_cast: false,  // shorthand is never TRY_CAST
                 };
             }
             // Dot access: expr.field
@@ -557,7 +558,10 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
         Token::Case => parse_case_expression(parser),
 
         // CAST function
-        Token::Cast => parse_cast_expression(parser),
+        Token::Cast => parse_cast_expression(parser, false),
+
+        // TRY_CAST function
+        Token::TryCast => parse_cast_expression(parser, true),
 
         // EXTRACT function
         Token::Extract => parse_extract_expression(parser),
@@ -691,9 +695,14 @@ fn parse_case_expression(parser: &mut Parser) -> Result<Expression> {
     }))
 }
 
-/// Parse CAST expression
-fn parse_cast_expression(parser: &mut Parser) -> Result<Expression> {
-    parser.expect(&Token::Cast)?;
+/// Parse CAST or TRY_CAST expression
+fn parse_cast_expression(parser: &mut Parser, try_cast: bool) -> Result<Expression> {
+    // Consume either CAST or TRY_CAST token
+    if try_cast {
+        parser.expect(&Token::TryCast)?;
+    } else {
+        parser.expect(&Token::Cast)?;
+    }
     parser.expect(&Token::LParen)?;
     let expr = parse_expression(parser)?;
     parser.expect(&Token::As)?;
@@ -703,7 +712,8 @@ fn parse_cast_expression(parser: &mut Parser) -> Result<Expression> {
     Ok(Expression::Cast {
         expr: Box::new(expr),
         data_type,
-        shorthand: false,  // explicit CAST(x AS type) syntax
+        shorthand: false,  // explicit CAST/TRY_CAST(x AS type) syntax
+        try_cast,
     })
 }
 

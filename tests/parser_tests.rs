@@ -909,10 +909,11 @@ mod cast_expressions {
         let stmt = parse_ok("SELECT CAST(id AS VARCHAR) FROM t");
         let expr = first_column_expr(&stmt);
         match expr {
-            Expression::Cast { expr, data_type, shorthand } => {
+            Expression::Cast { expr, data_type, shorthand, try_cast } => {
                 assert_eq!(**expr, Expression::Identifier("id".to_string()));
                 assert!(matches!(data_type, DataType::Varchar(_)));
                 assert!(!*shorthand, "Expected explicit CAST() syntax");
+                assert!(!*try_cast, "Expected regular CAST, not TRY_CAST");
             }
             _ => panic!("Expected Cast, got {:?}", expr),
         }
@@ -960,10 +961,11 @@ mod cast_expressions {
         let stmt = parse_ok("SELECT id::VARCHAR FROM t");
         let expr = first_column_expr(&stmt);
         match expr {
-            Expression::Cast { expr, data_type, shorthand } => {
+            Expression::Cast { expr, data_type, shorthand, try_cast } => {
                 assert_eq!(**expr, Expression::Identifier("id".to_string()));
                 assert!(matches!(data_type, DataType::Varchar(_)));
                 assert!(*shorthand, "Expected shorthand (::) syntax");
+                assert!(!*try_cast, "Expected regular CAST");
             }
             _ => panic!("Expected Cast (double colon syntax), got {:?}", expr),
         }

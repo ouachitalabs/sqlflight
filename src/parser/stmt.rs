@@ -348,6 +348,58 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         return Ok(TableReference::TableFunction { name: "FLATTEN".to_string(), args, table_wrapper: false, alias });
     }
 
+    // Handle VALUES clause (inline table values)
+    // Only treat as VALUES clause if followed by '(' - otherwise it's a table named "values"
+    if parser.check(&Token::Values) && matches!(parser.peek_at(1), Token::LParen) {
+        parser.advance();  // consume VALUES
+        let mut rows = Vec::new();
+        // Parse first row
+        parser.expect(&Token::LParen)?;
+        let mut row = vec![parse_expression(parser)?];
+        while parser.consume(&Token::Comma) {
+            row.push(parse_expression(parser)?);
+        }
+        rows.push(row);
+        parser.expect(&Token::RParen)?;
+        // Parse additional rows
+        while parser.consume(&Token::Comma) {
+            parser.expect(&Token::LParen)?;
+            let mut row = vec![parse_expression(parser)?];
+            while parser.consume(&Token::Comma) {
+                row.push(parse_expression(parser)?);
+            }
+            rows.push(row);
+            parser.expect(&Token::RParen)?;
+        }
+        // Parse optional alias: AS t(col1, col2, ...)
+        let alias = if parser.consume(&Token::As) {
+            if let Token::Identifier(table_alias) = parser.current().clone() {
+                parser.advance();
+                let mut column_aliases = Vec::new();
+                if parser.consume(&Token::LParen) {
+                    loop {
+                        if let Token::Identifier(col_name) = parser.current().clone() {
+                            parser.advance();
+                            column_aliases.push(col_name);
+                        } else {
+                            break;
+                        }
+                        if !parser.consume(&Token::Comma) {
+                            break;
+                        }
+                    }
+                    parser.expect(&Token::RParen)?;
+                }
+                Some(ValuesAlias { table_alias, column_aliases })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        return Ok(TableReference::Values(ValuesClause { rows, alias }));
+    }
+
     // Handle subquery
     if parser.check(&Token::LParen) {
         parser.advance();
@@ -365,8 +417,25 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
     // Table name
     let name = parse_qualified_table_name(parser)?;
 
-    // Parse optional AT/BEFORE time travel clause
-    let time_travel = parse_time_travel_clause(parser)?;
+    // Check if this is a table function call (name followed by parenthesis)
+    // e.g., SPLIT_TO_TABLE(tags.tag_list, ',')
+    if parser.check(&Token::LParen) {
+        parser.advance();
+        let args = parse_table_function_args(parser)?;
+        parser.expect(&Token::RParen)?;
+        let alias = parse_optional_alias(parser);
+        return Ok(TableReference::TableFunction { name, args, table_wrapper: false, alias });
+    }
+
+    // Parse optional CHANGES clause (must come before TIME_TRAVEL)
+    let changes = parse_changes_clause(parser)?;
+
+    // Parse optional AT/BEFORE time travel clause (only if no CHANGES clause, since CHANGES has its own)
+    let time_travel = if changes.is_none() {
+        parse_time_travel_clause(parser)?
+    } else {
+        None
+    };
 
     // Optional alias (before SAMPLE/PIVOT)
     let alias = parse_optional_alias(parser);
@@ -394,7 +463,7 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         name,
         alias,
         time_travel,
-        changes: None,
+        changes,
         sample,
         pivot,
         unpivot,
@@ -450,6 +519,64 @@ fn parse_time_travel_clause(parser: &mut Parser) -> Result<Option<TimeTravelClau
     } else {
         Ok(Some(TimeTravelClause::Before(point)))
     }
+}
+
+/// Parse optional CHANGES clause
+/// CHANGES (INFORMATION => DEFAULT | APPEND_ONLY) AT/BEFORE (TIMESTAMP => ...)
+fn parse_changes_clause(parser: &mut Parser) -> Result<Option<ChangesClause>> {
+    if !parser.consume(&Token::Changes) {
+        return Ok(None);
+    }
+
+    parser.expect(&Token::LParen)?;
+
+    // Parse INFORMATION => DEFAULT | APPEND_ONLY
+    if parser.check(&Token::Information) {
+        parser.advance();
+    } else if let Token::Identifier(name) = parser.current().clone() {
+        if name.eq_ignore_ascii_case("information") {
+            parser.advance();
+        } else {
+            return Err(crate::Error::ParseError {
+                message: format!("Expected INFORMATION in CHANGES clause, found {}", name),
+                span: None,
+            });
+        }
+    }
+    parser.expect(&Token::FatArrow)?;
+
+    let information = if parser.consume(&Token::Default) {
+        ChangesInformation::Default
+    } else if let Token::Identifier(name) = parser.current().clone() {
+        if name.eq_ignore_ascii_case("append_only") {
+            parser.advance();
+            ChangesInformation::AppendOnly
+        } else if name.eq_ignore_ascii_case("default") {
+            parser.advance();
+            ChangesInformation::Default
+        } else {
+            return Err(crate::Error::ParseError {
+                message: format!("Expected DEFAULT or APPEND_ONLY in CHANGES clause, found {}", name),
+                span: None,
+            });
+        }
+    } else {
+        return Err(crate::Error::ParseError {
+            message: "Expected DEFAULT or APPEND_ONLY in CHANGES clause".to_string(),
+            span: None,
+        });
+    };
+
+    parser.expect(&Token::RParen)?;
+
+    // Parse required AT/BEFORE clause
+    let at_or_before = parse_time_travel_clause(parser)?
+        .ok_or_else(|| crate::Error::ParseError {
+            message: "CHANGES clause requires AT or BEFORE clause".to_string(),
+            span: None,
+        })?;
+
+    Ok(Some(ChangesClause { information, at_or_before }))
 }
 
 /// Parse optional SAMPLE/TABLESAMPLE clause
@@ -1230,6 +1357,18 @@ fn parse_create_statement(parser: &mut Parser) -> Result<Statement> {
 
         let name = parse_qualified_table_name(parser)?;
 
+        // Check for CREATE TABLE ... CLONE source_table
+        if parser.consume(&Token::Clone) {
+            let source = parse_qualified_table_name(parser)?;
+            return Ok(Statement::CreateTable(CreateTableStatement {
+                if_not_exists,
+                name,
+                columns: Vec::new(),
+                as_query: None,
+                clone_source: Some(source),
+            }));
+        }
+
         // Check for CREATE TABLE AS SELECT
         if parser.consume(&Token::As) {
             let query = parse_select_statement(parser)?;
@@ -1238,6 +1377,7 @@ fn parse_create_statement(parser: &mut Parser) -> Result<Statement> {
                 name,
                 columns: Vec::new(),
                 as_query: Some(Box::new(query)),
+                clone_source: None,
             }));
         }
 
@@ -1254,6 +1394,7 @@ fn parse_create_statement(parser: &mut Parser) -> Result<Statement> {
             name,
             columns,
             as_query: None,
+            clone_source: None,
         }))
     } else if parser.consume(&Token::View) {
         let name = parse_qualified_table_name(parser)?;
@@ -1270,6 +1411,14 @@ fn parse_create_statement(parser: &mut Parser) -> Result<Statement> {
             None
         };
 
+        // Optional COPY GRANTS
+        let copy_grants = if parser.consume(&Token::Copy) {
+            parser.expect(&Token::Grants)?;
+            true
+        } else {
+            false
+        };
+
         parser.expect(&Token::As)?;
         let query = parse_select_statement(parser)?;
 
@@ -1277,6 +1426,7 @@ fn parse_create_statement(parser: &mut Parser) -> Result<Statement> {
             or_replace,
             name,
             columns,
+            copy_grants,
             query: Box::new(query),
         }))
     } else {

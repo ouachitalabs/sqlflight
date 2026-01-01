@@ -239,6 +239,7 @@ pub enum Expression {
         expr: Box<Expression>,
         data_type: DataType,
         shorthand: bool,  // true for :: syntax, false for CAST(x AS type)
+        try_cast: bool,   // true for TRY_CAST, false for CAST
     },
     Extract {
         field: String,
@@ -469,6 +470,7 @@ pub struct CreateTableStatement {
     pub name: String,
     pub columns: Vec<ColumnDefinition>,
     pub as_query: Option<Box<SelectStatement>>,
+    pub clone_source: Option<String>,
 }
 
 /// Column definition
@@ -486,6 +488,7 @@ pub struct CreateViewStatement {
     pub or_replace: bool,
     pub name: String,
     pub columns: Option<Vec<String>>,
+    pub copy_grants: bool,
     pub query: Box<SelectStatement>,
 }
 

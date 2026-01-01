@@ -531,6 +531,7 @@ impl Formatter {
         // Determine if we can keep a simple query all on one line
         // If any column is *, we break to multiline when there's a WHERE clause
         let has_star = stmt.columns.iter().any(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
+        let all_star = stmt.columns.iter().all(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
 
         // Check if FROM has a subquery or sample clause
         let has_subquery_from = stmt.from.as_ref().map_or(false, |from| {
@@ -560,7 +561,17 @@ impl Formatter {
             matches!(&from.table, TableReference::Table { time_travel: Some(_), .. })
         });
 
-        // Can only inline if: no other clauses except simple WHERE with named columns
+        // Check if FROM table has CHANGES clause
+        let has_changes = stmt.from.as_ref().map_or(false, |from| {
+            matches!(&from.table, TableReference::Table { changes: Some(_), .. })
+        });
+
+        // Check if FROM is a VALUES clause
+        let has_values = stmt.from.as_ref().map_or(false, |from| {
+            matches!(&from.table, TableReference::Values(_))
+        });
+
+        // "Extra" clauses force column formatting decisions
         // Note: UNION doesn't force FROM to newline, each SELECT in UNION formats independently
         let has_extra_clauses = stmt.group_by.is_some()
             || stmt.having.is_some()
@@ -570,6 +581,10 @@ impl Formatter {
             || stmt.limit.is_some()
             || !stmt.joins.is_empty()
             || has_subquery_from;
+
+        // Ordering clauses (ORDER BY, LIMIT) always force FROM to newline, even with select *
+        // Filtering clauses (QUALIFY, HAVING) do NOT force FROM to newline with select *
+        let has_ordering_clauses = stmt.order_by.is_some() || stmt.limit.is_some();
 
         // Estimate FROM clause width for column layout decision
         let from_width = stmt.from.as_ref().map_or(0, |from| {
@@ -588,15 +603,22 @@ impl Formatter {
             && self.is_simple_where(&stmt.where_clause)
             && !self.in_subquery;  // Never simple when inside a subquery
 
-        // FROM should be on new line if: vertical columns, has star with WHERE/JOINs, has extra clauses,
-        // we're inside a subquery, there's a SAMPLE clause, PIVOT/UNPIVOT, or TIME_TRAVEL
+        // FROM should be on new line if: vertical columns, has star with WHERE/JOINs,
+        // has any joins, has sample/pivot/time_travel/changes/values, in subquery,
+        // has ordering clauses (ORDER BY/LIMIT), FROM is subquery, or has non-filter extra clauses with non-star columns.
+        // Special case: `select *` with QUALIFY keeps FROM inline (e.g., `select * from t qualify ...`)
         let force_from_newline = !columns_inline
             || (has_star && (stmt.where_clause.is_some() || !stmt.joins.is_empty()))
-            || has_extra_clauses
+            || !stmt.joins.is_empty()  // Any join (including comma joins) forces FROM to newline
+            || has_ordering_clauses  // ORDER BY/LIMIT always force FROM to newline
+            || has_subquery_from  // Subquery FROM always forces newline
+            || (has_extra_clauses && !all_star)  // Other extra clauses force newline unless select *
             || has_sample
             || has_table_function
             || has_pivot_unpivot
             || has_time_travel
+            || has_changes
+            || has_values
             || self.in_subquery;
 
         // FROM clause
@@ -916,9 +938,14 @@ impl Formatter {
 
     fn format_table_reference(&mut self, table: &TableReference) {
         match table {
-            TableReference::Table { name, alias, time_travel, sample, pivot, unpivot, match_recognize, .. } => {
+            TableReference::Table { name, alias, time_travel, changes, sample, pivot, unpivot, match_recognize, .. } => {
                 self.printer.write(&format_identifier(name));
-                // Format TIME_TRAVEL clause (AT/BEFORE)
+                // Format CHANGES clause (includes its own AT/BEFORE)
+                if let Some(ch) = changes {
+                    self.printer.write(" ");
+                    self.format_changes(ch);
+                }
+                // Format TIME_TRAVEL clause (AT/BEFORE) - only if no CHANGES
                 if let Some(tt) = time_travel {
                     self.printer.write(" ");
                     self.format_time_travel(tt);
@@ -1292,14 +1319,24 @@ impl Formatter {
         }
     }
 
+    fn format_changes(&mut self, changes: &ChangesClause) {
+        self.printer.write("changes (information => ");
+        match &changes.information {
+            ChangesInformation::Default => self.printer.write("default"),
+            ChangesInformation::AppendOnly => self.printer.write("append_only"),
+        }
+        self.printer.write(") ");
+        self.format_time_travel(&changes.at_or_before);
+    }
+
     fn format_values(&mut self, values: &ValuesClause) {
         self.printer.write("values");
+        self.printer.indent();
         for (i, row) in values.rows.iter().enumerate() {
-            if i > 0 {
-                self.printer.write(",");
-            }
             self.printer.newline();
-            self.printer.indent();
+            if i > 0 {
+                self.printer.write(", ");
+            }
             self.printer.write("(");
             for (j, expr) in row.iter().enumerate() {
                 if j > 0 {
@@ -1308,13 +1345,14 @@ impl Formatter {
                 self.format_expression(expr);
             }
             self.printer.write(")");
-            self.printer.dedent();
         }
+        self.printer.dedent();
+        self.printer.newline();
         if let Some(alias) = &values.alias {
-            self.printer.write(" as ");
+            self.printer.write("as ");
             self.printer.write(&format_identifier(&alias.table_alias));
             if !alias.column_aliases.is_empty() {
-                self.printer.write(" (");
+                self.printer.write("(");
                 self.printer.write(&alias.column_aliases.iter()
                     .map(|c| format_identifier(c))
                     .collect::<Vec<_>>()
@@ -1671,12 +1709,19 @@ impl Formatter {
                     self.printer.write(" is null");
                 }
             }
-            Expression::Cast { expr, data_type, shorthand } => {
+            Expression::Cast { expr, data_type, shorthand, try_cast } => {
                 if *shorthand {
                     // Use Snowflake's :: cast syntax
                     self.format_expression(expr);
                     self.printer.write("::");
                     self.format_data_type(data_type);
+                } else if *try_cast {
+                    // Use TRY_CAST(expr AS type) syntax
+                    self.printer.write("try_cast(");
+                    self.format_expression(expr);
+                    self.printer.write(" as ");
+                    self.format_data_type(data_type);
+                    self.printer.write(")");
                 } else {
                     // Use standard CAST(expr AS type) syntax
                     self.printer.write("cast(");
@@ -2212,7 +2257,10 @@ impl Formatter {
         }
         self.printer.write(&format_identifier(&stmt.name));
 
-        if let Some(query) = &stmt.as_query {
+        if let Some(source) = &stmt.clone_source {
+            self.printer.write(" clone ");
+            self.printer.write(&format_identifier(source));
+        } else if let Some(query) = &stmt.as_query {
             self.printer.write(" as");
             self.printer.newline();
             self.format_select(query);
@@ -2267,9 +2315,17 @@ impl Formatter {
             self.printer.write(")");
         }
 
+        if stmt.copy_grants {
+            self.printer.write(" copy grants");
+        }
+
         self.printer.write(" as");
         self.printer.newline();
+        // Views are formatted like subqueries (FROM on newline for star queries)
+        let was_in_subquery = self.in_subquery;
+        self.in_subquery = true;
         self.format_select(&stmt.query);
+        self.in_subquery = was_in_subquery;
     }
 
     fn format_alter_table(&mut self, stmt: &AlterTableStatement) {
