@@ -1137,7 +1137,7 @@ mod select_statements {
         let select = as_select(&stmt);
         match &select.from.as_ref().unwrap().table {
             TableReference::Subquery { query, alias, .. } => {
-                assert_eq!(alias, "sub");
+                assert_eq!(alias, &Some("sub".to_string()));
                 assert!(query.from.is_some());
             }
             _ => panic!("Expected Subquery table reference"),

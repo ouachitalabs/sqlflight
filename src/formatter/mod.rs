@@ -976,12 +976,14 @@ impl Formatter {
                 self.printer.dedent();
                 self.printer.newline();
                 self.printer.write(")");
-                if *explicit_as {
-                    self.printer.write(" as ");
-                } else {
-                    self.printer.write(" ");
+                if let Some(a) = alias {
+                    if *explicit_as {
+                        self.printer.write(" as ");
+                    } else {
+                        self.printer.write(" ");
+                    }
+                    self.printer.write(&format_identifier(a));
                 }
-                self.printer.write(&format_identifier(alias));
             }
             TableReference::JinjaRef(name) => {
                 self.printer.write(name);
@@ -1134,9 +1136,23 @@ impl Formatter {
         self.printer.write(")");
 
         // Output alias if present
-        if let Some(a) = &pivot.alias {
-            self.printer.write(" ");
-            self.printer.write(&format_identifier(a));
+        if let Some(alias) = &pivot.alias {
+            if alias.explicit_as {
+                self.printer.write(" as ");
+            } else {
+                self.printer.write(" ");
+            }
+            self.printer.write(&format_identifier(&alias.name));
+            if let Some(cols) = &alias.column_aliases {
+                self.printer.write(" (");
+                for (i, col) in cols.iter().enumerate() {
+                    if i > 0 {
+                        self.printer.write(", ");
+                    }
+                    self.printer.write(&format_identifier(col));
+                }
+                self.printer.write(")");
+            }
         }
     }
 

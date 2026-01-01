@@ -83,7 +83,7 @@ pub enum TableReference {
     },
     Subquery {
         query: Box<SelectStatement>,
-        alias: String,
+        alias: Option<String>,
         explicit_as: bool,
     },
     JinjaRef(String),
@@ -574,7 +574,15 @@ pub struct PivotClause {
     pub aggregate_functions: Vec<(Expression, Option<String>)>,  // (expr, alias)
     pub for_column: String,
     pub in_values: Vec<(Expression, Option<String>)>,  // (value, alias)
-    pub alias: Option<String>,  // Optional table alias after PIVOT
+    pub alias: Option<PivotAlias>,  // Optional table alias after PIVOT
+}
+
+/// PIVOT alias with optional column aliases
+#[derive(Debug, Clone, PartialEq)]
+pub struct PivotAlias {
+    pub name: String,
+    pub explicit_as: bool,  // true if AS keyword was used
+    pub column_aliases: Option<Vec<String>>,  // Optional (col1, col2, ...)
 }
 
 /// UNPIVOT clause (Snowflake-specific)

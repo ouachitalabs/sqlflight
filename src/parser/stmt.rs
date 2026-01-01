@@ -462,7 +462,13 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         if parser.check(&Token::Select) || parser.check(&Token::With) {
             let query = Box::new(parse_select_statement(parser)?);
             parser.expect(&Token::RParen)?;
-            let (alias, explicit_as) = parse_required_alias_with_as(parser)?;
+            // Alias is optional when followed by PIVOT or UNPIVOT
+            let (alias, explicit_as) = if parser.check(&Token::Pivot) || parser.check(&Token::Unpivot) {
+                (None, false)
+            } else {
+                let (a, e) = parse_required_alias_with_as(parser)?;
+                (Some(a), e)
+            };
             return Ok(TableReference::Subquery { query, alias, explicit_as });
         } else {
             // Not a subquery, restore
@@ -763,8 +769,8 @@ fn parse_pivot_clause(parser: &mut Parser) -> Result<Option<PivotClause>> {
     parser.expect(&Token::RParen)?;  // Close IN list
     parser.expect(&Token::RParen)?;  // Close PIVOT
 
-    // Parse optional alias after PIVOT
-    let alias = parse_optional_alias(parser);
+    // Parse optional alias after PIVOT (possibly with column aliases)
+    let alias = parse_pivot_alias(parser)?;
 
     Ok(Some(PivotClause {
         aggregate_functions,
@@ -772,6 +778,46 @@ fn parse_pivot_clause(parser: &mut Parser) -> Result<Option<PivotClause>> {
         in_values,
         alias,
     }))
+}
+
+/// Parse optional PIVOT alias with optional column aliases: [AS] name [(col1, col2, ...)]
+fn parse_pivot_alias(parser: &mut Parser) -> Result<Option<PivotAlias>> {
+    use crate::ast::PivotAlias;
+
+    let explicit_as = parser.consume(&Token::As);
+    let name = if explicit_as {
+        parse_identifier(parser).ok()
+    } else if matches!(parser.current(), Token::Identifier(_) | Token::QuotedIdentifier(_)) {
+        if !is_keyword_that_ends_column(parser.current()) {
+            parse_identifier(parser).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(name) = name {
+        // Check for optional column aliases: (col1, col2, ...)
+        let column_aliases = if parser.consume(&Token::LParen) {
+            let mut aliases = Vec::new();
+            loop {
+                if let Ok(alias) = parse_identifier(parser) {
+                    aliases.push(alias);
+                }
+                if !parser.consume(&Token::Comma) {
+                    break;
+                }
+            }
+            parser.expect(&Token::RParen)?;
+            Some(aliases)
+        } else {
+            None
+        };
+        Ok(Some(PivotAlias { name, explicit_as, column_aliases }))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Parse optional UNPIVOT clause

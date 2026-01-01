@@ -254,6 +254,38 @@ pivot (
 ) p",
         );
     }
+
+    #[test]
+    fn pivot_with_column_aliases() {
+        assert_formats_to(
+            "SELECT * FROM (SELECT region, quarter, sales FROM sales_data) PIVOT(SUM(sales) FOR quarter IN ('Q1','Q2'))AS p(region,q1_sales,q2_sales)",
+            "select *
+from (
+  select region, quarter, sales
+  from sales_data
+)
+pivot (
+  sum(sales)
+  for quarter in ('Q1', 'Q2')
+) as p (region, q1_sales, q2_sales)",
+        );
+    }
+
+    #[test]
+    fn pivot_from_subquery_no_alias() {
+        assert_formats_to(
+            "SELECT * FROM (SELECT region FROM sales_data) PIVOT (SUM(sales) FOR quarter IN ('Q1','Q2'))",
+            "select *
+from (
+  select region
+  from sales_data
+)
+pivot (
+  sum(sales)
+  for quarter in ('Q1', 'Q2')
+)",
+        );
+    }
 }
 
 // =============================================================================
