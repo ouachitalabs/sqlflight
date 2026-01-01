@@ -573,8 +573,9 @@ impl Formatter {
 
         // Format columns and check if we should stay on same line for FROM
         // Force vertical if there are extra clauses
-        let has_joins = !stmt.joins.is_empty();
-        let columns_inline = self.format_select_columns(&stmt.columns, has_extra_clauses, from_width, has_joins);
+        // Only count non-comma joins as forcing vertical columns
+        let has_regular_joins = stmt.joins.iter().any(|j| !j.is_comma_join);
+        let columns_inline = self.format_select_columns(&stmt.columns, has_extra_clauses, from_width, has_regular_joins);
 
         let simple_query = columns_inline
             && !has_star  // No star columns when staying inline with WHERE
@@ -759,7 +760,8 @@ impl Formatter {
             TARGET_WIDTH
         };
         let exceeds_width = full_line_width > width_threshold;
-        // JOINs force vertical columns when there are multiple columns (but not for SELECT *)
+        // Regular JOINs (not comma joins) force vertical columns when there are multiple columns
+        // Comma joins don't force vertical if columns are simple
         let joins_force_vertical = has_joins && !all_star && columns.len() > 1;
         let force_vertical = joins_force_vertical
             || exceeds_width
@@ -974,7 +976,7 @@ impl Formatter {
                 self.printer.write("lateral ");
                 self.format_table_reference(inner);
             }
-            TableReference::TableFunction { name, args, table_wrapper } => {
+            TableReference::TableFunction { name, args, table_wrapper, alias } => {
                 if *table_wrapper {
                     self.printer.write("table(");
                 }
@@ -993,6 +995,10 @@ impl Formatter {
                 self.printer.write(")");
                 if *table_wrapper {
                     self.printer.write(")");
+                }
+                if let Some(a) = alias {
+                    self.printer.write(" ");
+                    self.printer.write(&format_identifier(a));
                 }
             }
             TableReference::Values(values) => {

@@ -330,7 +330,8 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
             let args = parse_table_function_args(parser)?;
             parser.expect(&Token::RParen)?;
             parser.expect(&Token::RParen)?;  // Close the outer TABLE()
-            return Ok(TableReference::TableFunction { name: func_name, args, table_wrapper: true });
+            let alias = parse_optional_alias(parser);
+            return Ok(TableReference::TableFunction { name: func_name, args, table_wrapper: true, alias });
         } else {
             // Not TABLE(...), restore and continue as regular table name
             parser.restore(pos);
@@ -342,8 +343,9 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         parser.expect(&Token::LParen)?;
         let args = parse_table_function_args(parser)?;
         parser.expect(&Token::RParen)?;
+        let alias = parse_optional_alias(parser);
         // Store as TableFunction with name "FLATTEN"
-        return Ok(TableReference::TableFunction { name: "FLATTEN".to_string(), args, table_wrapper: false });
+        return Ok(TableReference::TableFunction { name: "FLATTEN".to_string(), args, table_wrapper: false, alias });
     }
 
     // Handle subquery
@@ -785,7 +787,13 @@ fn parse_table_function_args(parser: &mut Parser) -> Result<Vec<(Option<String>,
 
     loop {
         // Check for named argument (name => value)
-        let arg = if let Token::Identifier(name) = parser.current().clone() {
+        // Parameter names can be identifiers or keywords like OUTER, PATH, MODE, etc.
+        let maybe_name = match parser.current().clone() {
+            Token::Identifier(name) => Some(name),
+            ref token => keyword_to_identifier(token),
+        };
+
+        let arg = if let Some(name) = maybe_name {
             let pos = parser.position();
             parser.advance();
             if parser.consume(&Token::FatArrow) {
@@ -1483,6 +1491,23 @@ fn keyword_to_identifier(token: &Token) -> Option<String> {
         Token::Rows => Some("rows".to_string()),
         Token::Range => Some("range".to_string()),
         Token::Groups => Some("groups".to_string()),
+        // FLATTEN-related parameter names
+        Token::Outer => Some("outer".to_string()),
+        Token::Inner => Some("inner".to_string()),
+        Token::Left => Some("left".to_string()),
+        Token::Right => Some("right".to_string()),
+        Token::Full => Some("full".to_string()),
+        Token::Cross => Some("cross".to_string()),
+        Token::Partition => Some("partition".to_string()),
+        Token::Order => Some("order".to_string()),
+        Token::By => Some("by".to_string()),
+        Token::Having => Some("having".to_string()),
+        Token::Group => Some("group".to_string()),
+        Token::Limit => Some("limit".to_string()),
+        Token::Offset => Some("offset".to_string()),
+        Token::Window => Some("window".to_string()),
+        Token::Over => Some("over".to_string()),
+        Token::Current => Some("current".to_string()),
         _ => None,
     }
 }
