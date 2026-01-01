@@ -311,10 +311,12 @@ fn parse_in_list(parser: &mut Parser, expr: Expression, negated: bool) -> Result
 
     // Check if it's a subquery by looking for SELECT
     if parser.check(&Token::Select) || parser.check(&Token::With) {
-        // This would call the statement parser, but we'll use a placeholder for now
-        return Err(crate::Error::ParseError {
-            message: "Subquery parsing not yet implemented".to_string(),
-            span: None,
+        let subquery = super::stmt::parse_select_statement(parser)?;
+        parser.expect(&Token::RParen)?;
+        return Ok(Expression::InSubquery {
+            expr: Box::new(expr),
+            subquery: Box::new(subquery),
+            negated,
         });
     }
 
@@ -564,11 +566,9 @@ fn parse_primary_expression(parser: &mut Parser) -> Result<Expression> {
             parser.advance();
             // Check for subquery
             if parser.check(&Token::Select) || parser.check(&Token::With) {
-                // Would call statement parser here
-                return Err(crate::Error::ParseError {
-                    message: "Subquery parsing not yet implemented".to_string(),
-                    span: None,
-                });
+                let subquery = super::stmt::parse_select_statement(parser)?;
+                parser.expect(&Token::RParen)?;
+                return Ok(Expression::Subquery(Box::new(subquery)));
             }
             let expr = parse_expression(parser)?;
             parser.expect(&Token::RParen)?;

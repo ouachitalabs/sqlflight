@@ -6,7 +6,9 @@ pub mod rules;
 use crate::ast::*;
 use crate::error::Result;
 use crate::jinja;
-use crate::parser;
+use crate::parser::lexer::{tokenize_with_comments, CommentToken};
+use crate::parser::expr::Parser;
+use crate::parser::stmt;
 use printer::{Printer, TARGET_WIDTH};
 use rules::SELECT_COLUMN_THRESHOLD;
 
@@ -15,16 +17,374 @@ pub fn format_sql(input: &str) -> Result<String> {
     // Step 1: Extract Jinja
     let (sql_with_placeholders, placeholders) = jinja::extract_jinja(input)?;
 
-    // Step 2: Parse SQL
-    let ast = parser::parse(&sql_with_placeholders)?;
+    // Step 2: Extract leading/trailing Jinja placeholders (before/after actual SQL)
+    let (leading_placeholders, sql_body, trailing_placeholders) =
+        extract_statement_level_placeholders(&sql_with_placeholders);
 
-    // Step 3: Format AST
+    // Step 3: Tokenize with comments
+    let tokenize_result = tokenize_with_comments(&sql_body)?;
+    let comments = tokenize_result.comments;
+
+    // Step 4: Parse SQL
+    // If there are no tokens (e.g., only Jinja), return the original
+    if tokenize_result.tokens.is_empty() {
+        return Ok(jinja::reintegrate_jinja(input, &placeholders));
+    }
+    let mut parser = Parser::new(&tokenize_result.tokens);
+    let ast = stmt::parse_statement(&mut parser)?;
+
+    // Step 5: Format AST
     let formatted = format_ast(&ast)?;
 
-    // Step 4: Reintegrate Jinja
-    let result = jinja::reintegrate_jinja(&formatted, &placeholders);
+    // Step 6: Interleave comments
+    let with_comments = interleave_comments(&sql_body, &formatted, &comments);
+
+    // Step 7: Reconstruct with leading/trailing placeholders
+    let mut result = String::new();
+    for placeholder in &leading_placeholders {
+        result.push_str(placeholder);
+        result.push('\n');
+    }
+    result.push_str(&with_comments);
+    for placeholder in &trailing_placeholders {
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(placeholder);
+    }
+
+    // Step 8: Reintegrate Jinja
+    let result = jinja::reintegrate_jinja(&result, &placeholders);
 
     Ok(result)
+}
+
+/// Extract Jinja placeholders that appear at statement level (before/after SQL)
+fn extract_statement_level_placeholders(input: &str) -> (Vec<String>, String, Vec<String>) {
+    let mut leading = Vec::new();
+    let mut trailing = Vec::new();
+    let mut body = input.to_string();
+
+    // Extract leading placeholders (at the very start of input, possibly inline)
+    loop {
+        let trimmed = body.trim_start();
+        if let Some(placeholder) = extract_leading_placeholder(trimmed) {
+            leading.push(placeholder.clone());
+            // Remove the placeholder from the body
+            if let Some(pos) = body.to_uppercase().find(&placeholder.to_uppercase()) {
+                body = body[pos + placeholder.len()..].to_string();
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Extract trailing placeholders (at the very end of input)
+    loop {
+        let trimmed = body.trim_end();
+        if let Some(placeholder) = extract_trailing_placeholder(trimmed) {
+            trailing.insert(0, placeholder.clone());
+            // Remove the placeholder from the body
+            let upper_body = body.to_uppercase();
+            let upper_placeholder = placeholder.to_uppercase();
+            if let Some(pos) = upper_body.rfind(&upper_placeholder) {
+                body = body[..pos].to_string();
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    (leading, body.trim().to_string(), trailing)
+}
+
+/// Extract a Jinja placeholder from the start of a string
+fn extract_leading_placeholder(s: &str) -> Option<String> {
+    let upper = s.to_uppercase();
+    if upper.starts_with(jinja::PLACEHOLDER_PREFIX) {
+        // Jinja placeholders end with __ (format: __SQLFLIGHT_JINJA_NNN__)
+        // Find the closing __
+        let prefix_len = jinja::PLACEHOLDER_PREFIX.len();
+        if let Some(end_pos) = upper[prefix_len..].find("__") {
+            let full_end = prefix_len + end_pos + 2; // +2 for the __
+            if full_end <= s.len() {
+                return Some(s[..full_end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract a Jinja placeholder from the end of a string (only if on its own line)
+fn extract_trailing_placeholder(s: &str) -> Option<String> {
+    // Only extract trailing placeholders that are on their own line
+    let lines: Vec<&str> = s.lines().collect();
+    if let Some(last_line) = lines.last() {
+        let trimmed = last_line.trim();
+        let upper = trimmed.to_uppercase();
+        if upper.starts_with(jinja::PLACEHOLDER_PREFIX) {
+            // Check if this is a valid placeholder (ends with __)
+            let prefix_len = jinja::PLACEHOLDER_PREFIX.len();
+            if let Some(end_pos) = upper[prefix_len..].find("__") {
+                let full_end = prefix_len + end_pos + 2;
+                // Must be ONLY the placeholder on this line
+                if full_end == trimmed.len() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Interleave comments into formatted output based on original positions
+fn interleave_comments(original: &str, formatted: &str, comments: &[CommentToken]) -> String {
+    if comments.is_empty() {
+        return formatted.to_string();
+    }
+
+    let original_lines: Vec<&str> = original.lines().collect();
+
+    // Determine comment type and context for each comment
+    #[derive(Debug, PartialEq, Clone)]
+    enum CommentType {
+        Standalone,      // On its own line (no SQL before it)
+        Trailing,        // At end of line with SQL before it, no SQL after
+        Inline,          // Between SQL tokens on same line (has SQL before AND after)
+    }
+
+    #[derive(Debug, Clone)]
+    struct CommentInfo {
+        comment: CommentToken,
+        comment_type: CommentType,
+        before_text: String,   // SQL text before the comment on the same line
+        after_text: String,    // SQL text after the comment on the same line (for inline)
+        orig_line: usize,      // Original line number (0-indexed)
+    }
+
+    let mut comment_infos: Vec<CommentInfo> = Vec::new();
+
+    for comment in comments {
+        let line_idx = comment.line.saturating_sub(1);
+        if line_idx < original_lines.len() {
+            let line = original_lines[line_idx];
+            let comment_marker = if comment.is_block { "/*" } else { "--" };
+
+            if let Some(pos) = line.find(comment_marker) {
+                let before = &line[..pos];
+                let after = if comment.is_block {
+                    // Find the end of this comment
+                    if let Some(end) = line[pos..].find("*/") {
+                        &line[pos + end + 2..]
+                    } else {
+                        ""
+                    }
+                } else {
+                    "" // Single-line comment goes to end
+                };
+
+                let has_sql_before = !before.trim().is_empty();
+                let has_sql_after = !after.trim().is_empty()
+                    && !after.trim().starts_with("--")
+                    && !after.trim().starts_with("/*");
+
+                let comment_type = if !has_sql_before {
+                    CommentType::Standalone
+                } else if has_sql_after {
+                    CommentType::Inline
+                } else {
+                    CommentType::Trailing
+                };
+
+                comment_infos.push(CommentInfo {
+                    comment: comment.clone(),
+                    comment_type,
+                    before_text: before.trim().to_lowercase(),
+                    after_text: after.trim().to_lowercase(),
+                    orig_line: line_idx,
+                });
+            } else {
+                // Comment marker not found on this line - likely a multi-line block comment
+                // continuation or something similar
+                comment_infos.push(CommentInfo {
+                    comment: comment.clone(),
+                    comment_type: CommentType::Standalone,
+                    before_text: String::new(),
+                    after_text: String::new(),
+                    orig_line: line_idx,
+                });
+            }
+        } else {
+            comment_infos.push(CommentInfo {
+                comment: comment.clone(),
+                comment_type: CommentType::Standalone,
+                before_text: String::new(),
+                after_text: String::new(),
+                orig_line: line_idx,
+            });
+        }
+    }
+
+    // Count how many original lines have SQL content
+    let orig_sql_lines: Vec<usize> = original_lines.iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with("--")
+                && !trimmed.starts_with("/*")
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    let formatted_lines: Vec<&str> = formatted.lines().collect();
+
+    // If the formatter merged multiple SQL lines into fewer formatted lines,
+    // we need to split them back up when there are trailing comments
+
+    // Build the result by tracking original SQL lines
+    let mut result = String::new();
+    let mut formatted_char_idx = 0;
+    let formatted_flat = formatted.replace('\n', " ");
+    let mut comment_idx = 0;
+
+    for (orig_line_idx, orig_line) in original_lines.iter().enumerate() {
+        // Add standalone comments for this line
+        while comment_idx < comment_infos.len()
+            && comment_infos[comment_idx].orig_line == orig_line_idx
+            && comment_infos[comment_idx].comment_type == CommentType::Standalone
+        {
+            if !result.is_empty() && !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(&comment_infos[comment_idx].comment.text);
+            comment_idx += 1;
+        }
+
+        // Check if this original line has SQL content
+        let line_trimmed = orig_line.trim();
+        let is_standalone_comment_line = line_trimmed.starts_with("--") || line_trimmed.starts_with("/*");
+        let has_sql = !line_trimmed.is_empty() && !is_standalone_comment_line;
+
+        if has_sql {
+            // Collect comments for this line
+            let line_comments: Vec<&CommentInfo> = comment_infos[comment_idx..]
+                .iter()
+                .take_while(|c| c.orig_line == orig_line_idx)
+                .filter(|c| c.comment_type != CommentType::Standalone)
+                .collect();
+
+            let num_line_comments = line_comments.len();
+
+            // Check if there's an inline comment - if so, the whole original line stays together
+            let has_inline = line_comments.iter().any(|c| c.comment_type == CommentType::Inline);
+
+            if has_inline {
+                // For inline comments, find both before and after content in formatted output
+                // and reconstruct the line with the comment inserted
+                let inline_comment = line_comments.iter()
+                    .find(|c| c.comment_type == CommentType::Inline)
+                    .unwrap();
+
+                let before_text = &inline_comment.before_text;
+                let after_text = &inline_comment.after_text;
+                let formatted_lower = formatted_flat.to_lowercase();
+
+                // Find before text
+                if let Some(before_pos) = formatted_lower[formatted_char_idx..].find(before_text) {
+                    let abs_before_pos = formatted_char_idx + before_pos;
+                    let before_end = abs_before_pos + before_text.len();
+
+                    // Find after text
+                    if let Some(after_pos) = formatted_lower[before_end..].find(after_text) {
+                        let abs_after_pos = before_end + after_pos;
+                        let after_end = abs_after_pos + after_text.len();
+
+                        // Build the line: before + comment + after
+                        let formatted_before = &formatted_flat[abs_before_pos..before_end];
+                        let formatted_after = &formatted_flat[abs_after_pos..after_end];
+
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str(formatted_before.trim());
+                        result.push(' ');
+                        result.push_str(&inline_comment.comment.text);
+                        result.push(' ');
+                        result.push_str(formatted_after.trim());
+
+                        formatted_char_idx = after_end;
+                    }
+                }
+            } else {
+                // No inline comment - get the SQL content before any trailing comment
+                let sql_content = if let Some(pos) = line_trimmed.find("--") {
+                    &line_trimmed[..pos]
+                } else if let Some(pos) = line_trimmed.find("/*") {
+                    &line_trimmed[..pos]
+                } else {
+                    line_trimmed
+                };
+                let sql_content = sql_content.trim().to_lowercase();
+
+                // Find this content in the formatted output (flattened)
+                let formatted_lower = formatted_flat.to_lowercase();
+                if let Some(pos) = formatted_lower[formatted_char_idx..].find(&sql_content) {
+                    let absolute_pos = formatted_char_idx + pos;
+                    let end_pos = absolute_pos + sql_content.len();
+
+                    // Get the formatted version of this SQL segment
+                    let formatted_segment = &formatted_flat[absolute_pos..end_pos];
+
+                    if !result.is_empty() && !result.ends_with('\n') {
+                        result.push('\n');
+                    }
+                    result.push_str(formatted_segment.trim());
+
+                    // Add trailing comments
+                    for ci in &line_comments {
+                        if ci.comment_type == CommentType::Trailing {
+                            result.push(' ');
+                            result.push_str(&ci.comment.text);
+                        }
+                    }
+
+                    formatted_char_idx = end_pos;
+                }
+            }
+
+            comment_idx += num_line_comments;
+        }
+    }
+
+    // Append any remaining formatted content
+    let remaining = formatted_flat[formatted_char_idx..].trim();
+    if !remaining.is_empty() {
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(remaining);
+    }
+
+    // Add any remaining comments
+    while comment_idx < comment_infos.len() {
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&comment_infos[comment_idx].comment.text);
+        comment_idx += 1;
+    }
+
+    // Add trailing newline if formatted had one
+    if formatted.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
 }
 
 /// Format AST to string
@@ -37,12 +397,14 @@ pub fn format_ast(ast: &Statement) -> Result<String> {
 /// AST Formatter
 struct Formatter {
     printer: Printer,
+    in_subquery: bool,
 }
 
 impl Formatter {
     fn new() -> Self {
         Self {
             printer: Printer::new(),
+            in_subquery: false,
         }
     }
 
@@ -82,12 +444,14 @@ impl Formatter {
             self.printer.write(" distinct");
         }
 
-        // Format columns and check if we should stay on same line for FROM
-        let columns_inline = self.format_select_columns(&stmt.columns);
-
         // Determine if we can keep a simple query all on one line
         // If any column is *, we break to multiline when there's a WHERE clause
         let has_star = stmt.columns.iter().any(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
+
+        // Check if FROM has a subquery
+        let has_subquery_from = stmt.from.as_ref().map_or(false, |from| {
+            matches!(from.table, TableReference::Subquery { .. })
+        });
 
         // Can only inline if: no other clauses except simple WHERE with named columns
         // Note: UNION doesn't force FROM to newline, each SELECT in UNION formats independently
@@ -97,17 +461,25 @@ impl Formatter {
             || stmt.window.is_some()
             || stmt.order_by.is_some()
             || stmt.limit.is_some()
-            || !stmt.joins.is_empty();
+            || !stmt.joins.is_empty()
+            || has_subquery_from;
+
+        // Format columns and check if we should stay on same line for FROM
+        // Force vertical if there are extra clauses
+        let columns_inline = self.format_select_columns(&stmt.columns, has_extra_clauses);
 
         let simple_query = columns_inline
             && !has_star  // No star columns when staying inline with WHERE
             && !has_extra_clauses
-            && self.is_simple_where(&stmt.where_clause);
+            && self.is_simple_where(&stmt.where_clause)
+            && !self.in_subquery;  // Never simple when inside a subquery
 
-        // FROM should be on new line if: vertical columns, has star with WHERE/JOINs, or has extra clauses
+        // FROM should be on new line if: vertical columns, has star with WHERE/JOINs, has extra clauses,
+        // or we're inside a subquery
         let force_from_newline = !columns_inline
             || (has_star && (stmt.where_clause.is_some() || !stmt.joins.is_empty()))
-            || has_extra_clauses;
+            || has_extra_clauses
+            || self.in_subquery;
 
         // FROM clause
         if let Some(from) = &stmt.from {
@@ -214,12 +586,12 @@ impl Formatter {
     }
 
     fn format_cte(&mut self, cte: &CommonTableExpression) {
-        self.printer.write(&cte.name.to_lowercase());
+        self.printer.write(&format_identifier(&cte.name));
 
         if let Some(columns) = &cte.columns {
             self.printer.write(" (");
             self.printer.write(&columns.iter()
-                .map(|c| c.to_lowercase())
+                .map(|c| format_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", "));
             self.printer.write(")");
@@ -228,14 +600,17 @@ impl Formatter {
         self.printer.write(" as (");
         self.printer.indent();
         self.printer.newline();
+        let was_in_subquery = self.in_subquery;
+        self.in_subquery = true;
         self.format_select(&cte.query);
+        self.in_subquery = was_in_subquery;
         self.printer.dedent();
         self.printer.newline();
         self.printer.write(")");
     }
 
     /// Format SELECT columns. Returns true if formatted inline, false if vertical.
-    fn format_select_columns(&mut self, columns: &[SelectColumn]) -> bool {
+    fn format_select_columns(&mut self, columns: &[SelectColumn], has_extra_clauses: bool) -> bool {
         // Estimate total width for inline decision
         let total_width: usize = columns.iter()
             .map(|c| self.estimate_column_width(c))
@@ -244,7 +619,15 @@ impl Formatter {
         // Check if any column contains a complex expression that forces vertical
         let has_complex_expr = columns.iter().any(|c| self.is_complex_expression(&c.expr));
 
-        let should_inline = columns.len() <= SELECT_COLUMN_THRESHOLD
+        // Check if all columns are star expressions (SELECT * or SELECT t.*)
+        let all_star = columns.iter().all(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
+
+        // Force vertical if we have extra clauses AND more than 2 named columns (not just *)
+        // 2 columns can still stay inline with extra clauses
+        let force_vertical = has_extra_clauses && !all_star && columns.len() > 2;
+
+        let should_inline = !force_vertical
+            && columns.len() <= SELECT_COLUMN_THRESHOLD
             && total_width + 7 <= TARGET_WIDTH  // 7 = "select "
             && !has_complex_expr;
 
@@ -308,17 +691,22 @@ impl Formatter {
 
     /// Check if an expression is complex enough to force vertical layout
     fn is_complex_expression(&self, expr: &Expression) -> bool {
-        matches!(expr,
-            Expression::Case(_)
-            | Expression::Subquery(_)
-        )
+        match expr {
+            Expression::Case(_) | Expression::Subquery(_) => true,
+            Expression::Parenthesized(inner) => self.is_complex_expression(inner),
+            _ => false,
+        }
     }
 
     fn format_select_column(&mut self, col: &SelectColumn) {
         self.format_expression(&col.expr);
         if let Some(alias) = &col.alias {
-            self.printer.write(" as ");
-            self.printer.write(&alias.to_lowercase());
+            if col.explicit_as {
+                self.printer.write(" as ");
+            } else {
+                self.printer.write(" ");
+            }
+            self.printer.write(&format_identifier(alias));
         }
     }
 
@@ -330,21 +718,29 @@ impl Formatter {
     fn format_table_reference(&mut self, table: &TableReference) {
         match table {
             TableReference::Table { name, alias, .. } => {
-                self.printer.write(&name.to_lowercase());
+                self.printer.write(&format_identifier(name));
                 if let Some(a) = alias {
                     self.printer.write(" ");
-                    self.printer.write(&a.to_lowercase());
+                    self.printer.write(&format_identifier(a));
                 }
             }
-            TableReference::Subquery { query, alias } => {
+            TableReference::Subquery { query, alias, explicit_as } => {
                 self.printer.write("(");
-                self.printer.newline();
                 self.printer.indent();
+                self.printer.newline();
+                let was_in_subquery = self.in_subquery;
+                self.in_subquery = true;
                 self.format_select(query);
+                self.in_subquery = was_in_subquery;
                 self.printer.dedent();
                 self.printer.newline();
-                self.printer.write(") ");
-                self.printer.write(&alias.to_lowercase());
+                self.printer.write(")");
+                if *explicit_as {
+                    self.printer.write(" as ");
+                } else {
+                    self.printer.write(" ");
+                }
+                self.printer.write(&format_identifier(alias));
             }
             TableReference::JinjaRef(name) => {
                 self.printer.write(name);
@@ -357,14 +753,14 @@ impl Formatter {
                 self.format_table_reference(inner);
             }
             TableReference::TableFunction { name, args } => {
-                self.printer.write(&name.to_lowercase());
+                self.printer.write(&format_identifier(name));
                 self.printer.write("(");
                 for (i, (param_name, expr)) in args.iter().enumerate() {
                     if i > 0 {
                         self.printer.write(", ");
                     }
                     if let Some(pname) = param_name {
-                        self.printer.write(&pname.to_lowercase());
+                        self.printer.write(&format_identifier(pname));
                         self.printer.write(" => ");
                     }
                     self.format_expression(expr);
@@ -420,11 +816,11 @@ impl Formatter {
         }
         if let Some(alias) = &values.alias {
             self.printer.write(" as ");
-            self.printer.write(&alias.table_alias.to_lowercase());
+            self.printer.write(&format_identifier(&alias.table_alias));
             if !alias.column_aliases.is_empty() {
                 self.printer.write(" (");
                 self.printer.write(&alias.column_aliases.iter()
-                    .map(|c| c.to_lowercase())
+                    .map(|c| format_identifier(c))
                     .collect::<Vec<_>>()
                     .join(", "));
                 self.printer.write(")");
@@ -433,10 +829,14 @@ impl Formatter {
     }
 
     fn format_join(&mut self, join: &JoinClause) {
-        // Note: We always output just "join" for Inner joins
-        // since we don't track whether INNER was explicit or implicit
         let join_keyword = match join.join_type {
-            JoinType::Inner => "join",
+            JoinType::Inner => {
+                if join.explicit_inner {
+                    "inner join"
+                } else {
+                    "join"
+                }
+            }
             JoinType::Left => "left join",
             JoinType::Right => "right join",
             JoinType::Full => "full outer join",
@@ -557,7 +957,7 @@ impl Formatter {
             if i > 0 {
                 self.printer.write(", ");
             }
-            self.printer.write(&def.name.to_lowercase());
+            self.printer.write(&format_identifier(&def.name));
             self.printer.write(" as (");
             self.format_window_spec(&def.spec);
             self.printer.write(")");
@@ -629,14 +1029,30 @@ impl Formatter {
     fn format_expression(&mut self, expr: &Expression) {
         match expr {
             Expression::Literal(lit) => self.format_literal(lit),
-            Expression::Identifier(name) => self.printer.write(&name.to_lowercase()),
+            Expression::Identifier(name) => {
+                // Preserve Jinja placeholders exactly as-is
+                if is_jinja_placeholder(name) {
+                    self.printer.write(name);
+                } else {
+                    self.printer.write(&name.to_lowercase());
+                }
+            }
             Expression::QualifiedIdentifier(parts) => {
-                let formatted: Vec<String> = parts.iter().map(|p| p.to_lowercase()).collect();
+                let formatted: Vec<String> = parts.iter()
+                    .map(|p| {
+                        // Preserve Jinja placeholders exactly as-is
+                        if is_jinja_placeholder(p) {
+                            p.clone()
+                        } else {
+                            p.to_lowercase()
+                        }
+                    })
+                    .collect();
                 self.printer.write(&formatted.join("."));
             }
             Expression::Star => self.printer.write("*"),
             Expression::QualifiedStar(name) => {
-                self.printer.write(&name.to_lowercase());
+                self.printer.write(&format_identifier(name));
                 self.printer.write(".*");
             }
             Expression::BinaryOp { left, op, right } => {
@@ -654,7 +1070,7 @@ impl Formatter {
                 self.format_expression(expr);
             }
             Expression::FunctionCall { name, args, over } => {
-                self.printer.write(&name.to_lowercase());
+                self.printer.write(&format_identifier(name));
                 self.printer.write("(");
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -672,9 +1088,12 @@ impl Formatter {
             Expression::Case(case) => self.format_case(case),
             Expression::Subquery(query) => {
                 self.printer.write("(");
-                self.printer.newline();
                 self.printer.indent();
+                self.printer.newline();
+                let was_in_subquery = self.in_subquery;
+                self.in_subquery = true;
                 self.format_select(query);
+                self.in_subquery = was_in_subquery;
                 self.printer.dedent();
                 self.printer.newline();
                 self.printer.write(")");
@@ -699,12 +1118,19 @@ impl Formatter {
                     self.printer.write(" not");
                 }
                 self.printer.write(" in (");
-                self.printer.newline();
+                // Save current indent and reset to 1 level for subquery
+                let saved_indent = self.printer.reset_indent();
                 self.printer.indent();
+                self.printer.newline();
+                let was_in_subquery = self.in_subquery;
+                self.in_subquery = true;
                 self.format_select(subquery);
+                self.in_subquery = was_in_subquery;
                 self.printer.dedent();
                 self.printer.newline();
                 self.printer.write(")");
+                // Restore original indent
+                self.printer.restore_indent(saved_indent);
             }
             Expression::Between { expr, low, high, negated } => {
                 self.format_expression(expr);
@@ -733,7 +1159,7 @@ impl Formatter {
             }
             Expression::Extract { field, expr } => {
                 self.printer.write("extract(");
-                self.printer.write(&field.to_lowercase());
+                self.printer.write(&format_identifier(field));
                 self.printer.write(" from ");
                 self.format_expression(expr);
                 self.printer.write(")");
@@ -746,9 +1172,20 @@ impl Formatter {
                 self.printer.write(content);
             }
             Expression::Parenthesized(inner) => {
-                self.printer.write("(");
-                self.format_expression(inner);
-                self.printer.write(")");
+                if self.is_complex_expression(inner) {
+                    // Complex expressions inside parens get their own lines
+                    self.printer.write("(");
+                    self.printer.indent();
+                    self.printer.newline();
+                    self.format_expression(inner);
+                    self.printer.dedent();
+                    self.printer.newline();
+                    self.printer.write(")");
+                } else {
+                    self.printer.write("(");
+                    self.format_expression(inner);
+                    self.printer.write(")");
+                }
             }
             Expression::SemiStructuredAccess { expr, path } => {
                 self.format_expression(expr);
@@ -923,7 +1360,7 @@ impl Formatter {
     fn format_data_type(&mut self, dt: &DataType) {
         let s = match dt {
             DataType::Boolean => "boolean".to_string(),
-            DataType::Integer => "integer".to_string(),
+            DataType::Integer => "int".to_string(),
             DataType::BigInt => "bigint".to_string(),
             DataType::Float => "float".to_string(),
             DataType::Double => "double".to_string(),
@@ -960,36 +1397,73 @@ impl Formatter {
 
     fn format_insert(&mut self, stmt: &InsertStatement) {
         self.printer.write("insert into ");
-        self.printer.write(&stmt.table.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.table));
 
+        // Format columns - vertical if >= 4 columns
         if let Some(columns) = &stmt.columns {
-            self.printer.write(" (");
-            self.printer.write(&columns.iter()
-                .map(|c| c.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(", "));
-            self.printer.write(")");
+            if columns.len() >= 4 {
+                // Vertical with leading commas
+                self.printer.write(" (");
+                self.printer.indent();
+                self.printer.newline();
+                for (i, col) in columns.iter().enumerate() {
+                    if i > 0 {
+                        self.printer.newline();
+                        self.printer.write(", ");
+                    }
+                    self.printer.write(&format_identifier(col));
+                }
+                self.printer.dedent();
+                self.printer.newline();
+                self.printer.write(")");
+            } else {
+                self.printer.write(" (");
+                self.printer.write(&columns.iter()
+                    .map(|c| format_identifier(c))
+                    .collect::<Vec<_>>()
+                    .join(", "));
+                self.printer.write(")");
+            }
         }
 
         self.printer.newline();
         match &stmt.source {
             InsertSource::Values(rows) => {
-                self.printer.write("values");
-                for (i, row) in rows.iter().enumerate() {
-                    if i > 0 {
-                        self.printer.write(",");
-                    }
-                    self.printer.newline();
-                    self.printer.indent();
+                self.printer.write("values ");
+                // Use the first row's length to determine formatting
+                let first_row_len = rows.first().map_or(0, |r| r.len());
+                if rows.len() == 1 && first_row_len <= 3 {
+                    // Single row with few values: inline
                     self.printer.write("(");
-                    for (j, expr) in row.iter().enumerate() {
+                    for (j, expr) in rows[0].iter().enumerate() {
                         if j > 0 {
                             self.printer.write(", ");
                         }
                         self.format_expression(expr);
                     }
                     self.printer.write(")");
+                } else {
+                    // Multiple rows or many values: vertical with leading commas
+                    self.printer.write("(");
+                    self.printer.indent();
+                    self.printer.newline();
+                    for (i, row) in rows.iter().enumerate() {
+                        if i > 0 {
+                            self.printer.newline();
+                            self.printer.write("), (");
+                            self.printer.newline();
+                        }
+                        for (j, expr) in row.iter().enumerate() {
+                            if j > 0 {
+                                self.printer.newline();
+                                self.printer.write(", ");
+                            }
+                            self.format_expression(expr);
+                        }
+                    }
                     self.printer.dedent();
+                    self.printer.newline();
+                    self.printer.write(")");
                 }
             }
             InsertSource::Query(query) => {
@@ -1000,28 +1474,39 @@ impl Formatter {
 
     fn format_update(&mut self, stmt: &UpdateStatement) {
         self.printer.write("update ");
-        self.printer.write(&stmt.table.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.table));
 
         if let Some(alias) = &stmt.alias {
             self.printer.write(" ");
-            self.printer.write(&alias.to_lowercase());
+            self.printer.write(&format_identifier(alias));
         }
 
         self.printer.newline();
         self.printer.write("set");
-        self.printer.newline();
-        self.printer.indent();
 
-        for (i, (col, expr)) in stmt.assignments.iter().enumerate() {
-            if i > 0 {
-                self.printer.newline();
-                self.printer.write(", ");
-            }
-            self.printer.write(&col.to_lowercase());
+        if stmt.assignments.len() == 1 {
+            // Single assignment: inline
+            self.printer.write(" ");
+            let (col, expr) = &stmt.assignments[0];
+            self.printer.write(&format_identifier(col));
             self.printer.write(" = ");
             self.format_expression(expr);
+        } else {
+            // Multiple assignments: vertical with leading commas
+            self.printer.indent();
+            self.printer.newline();
+
+            for (i, (col, expr)) in stmt.assignments.iter().enumerate() {
+                if i > 0 {
+                    self.printer.newline();
+                    self.printer.write(", ");
+                }
+                self.printer.write(&format_identifier(col));
+                self.printer.write(" = ");
+                self.format_expression(expr);
+            }
+            self.printer.dedent();
         }
-        self.printer.dedent();
 
         if let Some(from) = &stmt.from {
             self.printer.newline();
@@ -1036,11 +1521,11 @@ impl Formatter {
 
     fn format_delete(&mut self, stmt: &DeleteStatement) {
         self.printer.write("delete from ");
-        self.printer.write(&stmt.table.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.table));
 
         if let Some(alias) = &stmt.alias {
             self.printer.write(" ");
-            self.printer.write(&alias.to_lowercase());
+            self.printer.write(&format_identifier(alias));
         }
 
         if let Some(using) = &stmt.using {
@@ -1057,20 +1542,22 @@ impl Formatter {
 
     fn format_merge(&mut self, stmt: &MergeStatement) {
         self.printer.write("merge into ");
-        self.printer.write(&stmt.target.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.target));
 
         if let Some(alias) = &stmt.target_alias {
             self.printer.write(" ");
-            self.printer.write(&alias.to_lowercase());
+            self.printer.write(&format_identifier(alias));
         }
 
         self.printer.newline();
         self.printer.write("using ");
         self.format_table_reference(&stmt.source);
 
+        self.printer.indent();
         self.printer.newline();
         self.printer.write("on ");
         self.format_expression(&stmt.condition);
+        self.printer.dedent();
 
         for clause in &stmt.clauses {
             self.printer.newline();
@@ -1087,8 +1574,8 @@ impl Formatter {
                     self.format_expression(cond);
                 }
                 self.printer.write(" then");
-                self.printer.newline();
                 self.printer.indent();
+                self.printer.newline();
                 self.format_merge_action(action);
                 self.printer.dedent();
             }
@@ -1099,8 +1586,8 @@ impl Formatter {
                     self.format_expression(cond);
                 }
                 self.printer.write(" then");
-                self.printer.newline();
                 self.printer.indent();
+                self.printer.newline();
                 self.format_merge_action(action);
                 self.printer.dedent();
             }
@@ -1110,19 +1597,16 @@ impl Formatter {
     fn format_merge_action(&mut self, action: &MergeAction) {
         match action {
             MergeAction::Update(assignments) => {
-                self.printer.write("update set");
-                self.printer.newline();
-                self.printer.indent();
+                self.printer.write("update set ");
+                // Always inline for MERGE UPDATE since it's usually just one or two assignments
                 for (i, (col, expr)) in assignments.iter().enumerate() {
                     if i > 0 {
-                        self.printer.newline();
                         self.printer.write(", ");
                     }
-                    self.printer.write(&col.to_lowercase());
+                    self.printer.write(&format_identifier(col));
                     self.printer.write(" = ");
                     self.format_expression(expr);
                 }
-                self.printer.dedent();
             }
             MergeAction::Delete => {
                 self.printer.write("delete");
@@ -1132,12 +1616,13 @@ impl Formatter {
                 if let Some(cols) = columns {
                     self.printer.write(" (");
                     self.printer.write(&cols.iter()
-                        .map(|c| c.to_lowercase())
+                        .map(|c| format_identifier(c))
                         .collect::<Vec<_>>()
                         .join(", "));
                     self.printer.write(")");
                 }
-                self.printer.write(" values (");
+                self.printer.newline();
+                self.printer.write("values (");
                 for (i, expr) in values.iter().enumerate() {
                     if i > 0 {
                         self.printer.write(", ");
@@ -1154,7 +1639,7 @@ impl Formatter {
         if stmt.if_not_exists {
             self.printer.write("if not exists ");
         }
-        self.printer.write(&stmt.name.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.name));
 
         if let Some(query) = &stmt.as_query {
             self.printer.write(" as");
@@ -1162,8 +1647,8 @@ impl Formatter {
             self.format_select(query);
         } else {
             self.printer.write(" (");
-            self.printer.newline();
             self.printer.indent();
+            self.printer.newline();
 
             for (i, col) in stmt.columns.iter().enumerate() {
                 if i > 0 {
@@ -1180,7 +1665,7 @@ impl Formatter {
     }
 
     fn format_column_definition(&mut self, col: &ColumnDefinition) {
-        self.printer.write(&col.name.to_lowercase());
+        self.printer.write(&format_identifier(&col.name));
         self.printer.write(" ");
         self.format_data_type(&col.data_type);
 
@@ -1200,12 +1685,12 @@ impl Formatter {
         } else {
             self.printer.write("create view ");
         }
-        self.printer.write(&stmt.name.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.name));
 
         if let Some(columns) = &stmt.columns {
             self.printer.write(" (");
             self.printer.write(&columns.iter()
-                .map(|c| c.to_lowercase())
+                .map(|c| format_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", "));
             self.printer.write(")");
@@ -1218,7 +1703,7 @@ impl Formatter {
 
     fn format_alter_table(&mut self, stmt: &AlterTableStatement) {
         self.printer.write("alter table ");
-        self.printer.write(&stmt.name.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.name));
         self.printer.write(" ");
 
         match &stmt.action {
@@ -1228,17 +1713,17 @@ impl Formatter {
             }
             AlterTableAction::DropColumn(name) => {
                 self.printer.write("drop column ");
-                self.printer.write(&name.to_lowercase());
+                self.printer.write(&format_identifier(name));
             }
             AlterTableAction::RenameColumn { old, new } => {
                 self.printer.write("rename column ");
-                self.printer.write(&old.to_lowercase());
+                self.printer.write(&format_identifier(old));
                 self.printer.write(" to ");
-                self.printer.write(&new.to_lowercase());
+                self.printer.write(&format_identifier(new));
             }
             AlterTableAction::AlterColumn { name, data_type } => {
                 self.printer.write("alter column ");
-                self.printer.write(&name.to_lowercase());
+                self.printer.write(&format_identifier(name));
                 self.printer.write(" set data type ");
                 self.format_data_type(data_type);
             }
@@ -1250,7 +1735,7 @@ impl Formatter {
         if stmt.if_exists {
             self.printer.write("if exists ");
         }
-        self.printer.write(&stmt.name.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.name));
     }
 
     fn format_drop_view(&mut self, stmt: &DropViewStatement) {
@@ -1258,6 +1743,44 @@ impl Formatter {
         if stmt.if_exists {
             self.printer.write("if exists ");
         }
-        self.printer.write(&stmt.name.to_lowercase());
+        self.printer.write(&format_identifier(&stmt.name));
+    }
+}
+
+/// Check if a string is a Jinja placeholder that should be preserved as-is
+fn is_jinja_placeholder(s: &str) -> bool {
+    let upper = s.to_uppercase();
+    upper.starts_with(jinja::PLACEHOLDER_PREFIX)
+}
+
+/// Check if a string contains an embedded Jinja placeholder
+fn contains_jinja_placeholder(s: &str) -> bool {
+    s.to_uppercase().contains(jinja::PLACEHOLDER_PREFIX)
+}
+
+/// Format an identifier, preserving Jinja placeholders
+fn format_identifier(s: &str) -> String {
+    if is_jinja_placeholder(s) {
+        // Pure placeholder - preserve as-is
+        s.to_string()
+    } else if contains_jinja_placeholder(s) {
+        // Contains embedded placeholder (e.g., "users__SQLFLIGHT_JINJA_001__")
+        // Split on placeholder boundaries and format appropriately
+        let upper = s.to_uppercase();
+        if let Some(pos) = upper.find(jinja::PLACEHOLDER_PREFIX) {
+            // Find the end of the placeholder
+            let prefix_len = jinja::PLACEHOLDER_PREFIX.len();
+            if let Some(end_offset) = upper[pos + prefix_len..].find("__") {
+                let end = pos + prefix_len + end_offset + 2;
+                let before = &s[..pos];
+                let placeholder = &s[pos..end];
+                let after = &s[end..];
+                return format!("{}{}{}", before.to_lowercase(), placeholder, format_identifier(after));
+            }
+        }
+        // Fallback to lowercase if pattern doesn't match
+        s.to_lowercase()
+    } else {
+        s.to_lowercase()
     }
 }

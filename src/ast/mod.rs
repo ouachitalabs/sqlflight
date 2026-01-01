@@ -56,6 +56,7 @@ pub struct CommonTableExpression {
 pub struct SelectColumn {
     pub expr: Expression,
     pub alias: Option<String>,
+    pub explicit_as: bool,  // Track if AS keyword was explicit
 }
 
 /// FROM clause
@@ -80,6 +81,7 @@ pub enum TableReference {
     Subquery {
         query: Box<SelectStatement>,
         alias: String,
+        explicit_as: bool,
     },
     JinjaRef(String),
     Flatten(FlattenClause),
@@ -97,6 +99,7 @@ pub struct JoinClause {
     pub join_type: JoinType,
     pub table: TableReference,
     pub condition: Option<Expression>,
+    pub explicit_inner: bool,  // Track if INNER was explicitly written
 }
 
 /// JOIN types

@@ -1132,7 +1132,7 @@ mod select_statements {
         let stmt = parse_ok("SELECT * FROM (SELECT id FROM users) AS sub");
         let select = as_select(&stmt);
         match &select.from.as_ref().unwrap().table {
-            TableReference::Subquery { query, alias } => {
+            TableReference::Subquery { query, alias, .. } => {
                 assert_eq!(alias, "sub");
                 assert!(query.from.is_some());
             }

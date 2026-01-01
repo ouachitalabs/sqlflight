@@ -51,6 +51,18 @@ impl Printer {
         }
     }
 
+    /// Reset indent to 0 and return the previous level
+    pub fn reset_indent(&mut self) -> usize {
+        let saved = self.indent_level;
+        self.indent_level = 0;
+        saved
+    }
+
+    /// Restore indent to a saved level
+    pub fn restore_indent(&mut self, level: usize) {
+        self.indent_level = level;
+    }
+
     /// Check if adding text would exceed target width
     pub fn would_exceed_width(&self, text: &str) -> bool {
         self.current_line_width + text.len() > TARGET_WIDTH

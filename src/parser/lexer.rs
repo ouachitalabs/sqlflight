@@ -174,13 +174,37 @@ pub enum Token {
 }
 
 /// Tokenize SQL input
+/// Comment with position information
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentToken {
+    pub text: String,
+    pub line: usize,
+    pub is_block: bool,  // true for /* */, false for --
+}
+
+/// Tokenize result with comments extracted
+pub struct TokenizeResult {
+    pub tokens: Vec<Token>,
+    pub comments: Vec<CommentToken>,
+}
+
 pub fn tokenize(input: &str) -> crate::Result<Vec<Token>> {
+    let result = tokenize_with_comments(input)?;
+    Ok(result.tokens)
+}
+
+pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
     let mut remaining = input;
     let mut tokens = Vec::new();
+    let mut comments = Vec::new();
+    let mut current_line = 1;
 
     while !remaining.is_empty() {
-        // Skip whitespace
+        // Track line numbers through whitespace
         let trimmed = remaining.trim_start();
+        let whitespace = &remaining[..remaining.len() - trimmed.len()];
+        current_line += whitespace.chars().filter(|c| *c == '\n').count();
+
         if trimmed.is_empty() {
             break;
         }
@@ -189,7 +213,39 @@ pub fn tokenize(input: &str) -> crate::Result<Vec<Token>> {
         // Try to parse a token
         match parse_token(&mut remaining) {
             Ok(token) => {
-                tokens.push(token);
+                // Extract comments and store with line info
+                match &token {
+                    Token::SingleLineComment(text) => {
+                        comments.push(CommentToken {
+                            text: format!("--{}", text),
+                            line: current_line,
+                            is_block: false,
+                        });
+                        // Count newlines in the comment text
+                        current_line += text.chars().filter(|c| *c == '\n').count();
+                    }
+                    Token::MultiLineComment(text) => {
+                        comments.push(CommentToken {
+                            text: format!("/*{}*/", text),
+                            line: current_line,
+                            is_block: true,
+                        });
+                        // Count newlines in the comment text
+                        current_line += text.chars().filter(|c| *c == '\n').count();
+                    }
+                    Token::JinjaComment(text) => {
+                        comments.push(CommentToken {
+                            text: format!("{{# {} #}}", text.trim()),
+                            line: current_line,
+                            is_block: true,
+                        });
+                        current_line += text.chars().filter(|c| *c == '\n').count();
+                    }
+                    _ => {
+                        // Don't add comment tokens to the token stream
+                        tokens.push(token);
+                    }
+                }
             }
             Err(e) => {
                 // Check if it's a Cut error - these are always fatal
@@ -213,7 +269,7 @@ pub fn tokenize(input: &str) -> crate::Result<Vec<Token>> {
     }
 
     tokens.push(Token::Eof);
-    Ok(tokens)
+    Ok(TokenizeResult { tokens, comments })
 }
 
 fn parse_token<'s>(input: &mut &'s str) -> ModalResult<Token> {

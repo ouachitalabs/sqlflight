@@ -3,15 +3,25 @@
 //! Parses SQL statements (SELECT, INSERT, UPDATE, DELETE, CREATE, etc.)
 
 use crate::ast::*;
+use crate::jinja::PLACEHOLDER_PREFIX;
 use crate::parser::expr::{parse_data_type, parse_expression, parse_order_by_items, Parser};
 use crate::parser::lexer::Token;
 use crate::Result;
 
+/// Check if a token is a Jinja placeholder identifier
+fn is_jinja_placeholder_token(token: &Token) -> bool {
+    match token {
+        Token::Identifier(name) => name.to_uppercase().starts_with(PLACEHOLDER_PREFIX),
+        _ => false,
+    }
+}
+
 /// Parse a SQL statement from tokens
 pub fn parse_statement(parser: &mut Parser) -> Result<Statement> {
-    // Skip any leading Jinja config blocks (e.g., {{ config(...) }})
+    // Skip any leading Jinja config blocks, Jinja tokens, or Jinja placeholders
     while parser.check(&Token::JinjaExpression("".to_string()))
         || parser.check(&Token::JinjaStatement("".to_string()))
+        || is_jinja_placeholder_token(parser.current())
     {
         parser.advance();
     }
@@ -213,23 +223,23 @@ fn parse_select_columns(parser: &mut Parser) -> Result<Vec<SelectColumn>> {
 fn parse_select_column(parser: &mut Parser) -> Result<SelectColumn> {
     let expr = parse_expression(parser)?;
 
-    let alias = if parser.consume(&Token::As) {
-        Some(parse_identifier(parser)?)
+    let (alias, explicit_as) = if parser.consume(&Token::As) {
+        (Some(parse_identifier(parser)?), true)
     } else if matches!(parser.current(), Token::Identifier(_) | Token::QuotedIdentifier(_)) {
         // Allow alias without AS keyword
         let pos = parser.position();
         // Look ahead to make sure it's not a keyword
         if !is_keyword_that_ends_column(parser.current()) {
-            Some(parse_identifier(parser)?)
+            (Some(parse_identifier(parser)?), false)
         } else {
             parser.restore(pos);
-            None
+            (None, false)
         }
     } else {
-        None
+        (None, false)
     };
 
-    Ok(SelectColumn { expr, alias })
+    Ok(SelectColumn { expr, alias, explicit_as })
 }
 
 /// Check if token is a keyword that could end a column expression
@@ -286,8 +296,8 @@ fn parse_table_reference(parser: &mut Parser) -> Result<TableReference> {
         if parser.check(&Token::Select) || parser.check(&Token::With) {
             let query = Box::new(parse_select_statement(parser)?);
             parser.expect(&Token::RParen)?;
-            let alias = parse_required_alias(parser)?;
-            return Ok(TableReference::Subquery { query, alias });
+            let (alias, explicit_as) = parse_required_alias_with_as(parser)?;
+            return Ok(TableReference::Subquery { query, alias, explicit_as });
         } else {
             // Not a subquery, restore
             parser.restore(parser.position() - 1);
@@ -339,10 +349,11 @@ fn parse_optional_alias(parser: &mut Parser) -> Option<String> {
     }
 }
 
-/// Parse required alias (for subqueries)
-fn parse_required_alias(parser: &mut Parser) -> Result<String> {
-    parser.consume(&Token::As);
-    parse_identifier(parser)
+/// Parse required alias (for subqueries), returns (alias, explicit_as)
+fn parse_required_alias_with_as(parser: &mut Parser) -> Result<(String, bool)> {
+    let explicit_as = parser.consume(&Token::As);
+    let alias = parse_identifier(parser)?;
+    Ok((alias, explicit_as))
 }
 
 /// Parse JOIN clauses
@@ -350,28 +361,28 @@ fn parse_join_clauses(parser: &mut Parser) -> Result<Vec<JoinClause>> {
     let mut joins = Vec::new();
 
     loop {
-        let join_type = if parser.consume(&Token::Cross) {
+        let (join_type, explicit_inner) = if parser.consume(&Token::Cross) {
             parser.expect(&Token::Join)?;
-            Some(JoinType::Cross)
+            (Some(JoinType::Cross), false)
         } else if parser.consume(&Token::Inner) {
             parser.expect(&Token::Join)?;
-            Some(JoinType::Inner)
+            (Some(JoinType::Inner), true)  // Explicit INNER
         } else if parser.consume(&Token::Left) {
             parser.consume(&Token::Outer);
             parser.expect(&Token::Join)?;
-            Some(JoinType::Left)
+            (Some(JoinType::Left), false)
         } else if parser.consume(&Token::Right) {
             parser.consume(&Token::Outer);
             parser.expect(&Token::Join)?;
-            Some(JoinType::Right)
+            (Some(JoinType::Right), false)
         } else if parser.consume(&Token::Full) {
             parser.consume(&Token::Outer);
             parser.expect(&Token::Join)?;
-            Some(JoinType::Full)
+            (Some(JoinType::Full), false)
         } else if parser.consume(&Token::Join) {
-            Some(JoinType::Inner) // Default to INNER
+            (Some(JoinType::Inner), false)  // Implicit INNER
         } else {
-            None
+            (None, false)
         };
 
         if let Some(join_type) = join_type {
@@ -387,6 +398,7 @@ fn parse_join_clauses(parser: &mut Parser) -> Result<Vec<JoinClause>> {
                 join_type,
                 table,
                 condition,
+                explicit_inner,
             });
         } else {
             break;
@@ -513,7 +525,7 @@ fn parse_update_statement(parser: &mut Parser) -> Result<UpdateStatement> {
 
 /// Parse column = expression assignment
 fn parse_assignment(parser: &mut Parser) -> Result<(String, Expression)> {
-    let column = parse_identifier(parser)?;
+    let column = parse_qualified_table_name(parser)?;  // Allow qualified names like t.name
     parser.expect(&Token::Eq)?;
     let value = parse_expression(parser)?;
     Ok((column, value))
@@ -802,17 +814,22 @@ fn parse_alter_statement(parser: &mut Parser) -> Result<Statement> {
 fn parse_drop_statement(parser: &mut Parser) -> Result<Statement> {
     parser.expect(&Token::Drop)?;
 
-    let if_exists = if parser.consume(&Token::If) {
-        parser.expect(&Token::Exists)?;
-        true
-    } else {
-        false
-    };
-
     if parser.consume(&Token::Table) {
+        let if_exists = if parser.consume(&Token::If) {
+            parser.expect(&Token::Exists)?;
+            true
+        } else {
+            false
+        };
         let name = parse_qualified_table_name(parser)?;
         Ok(Statement::DropTable(DropTableStatement { if_exists, name }))
     } else if parser.consume(&Token::View) {
+        let if_exists = if parser.consume(&Token::If) {
+            parser.expect(&Token::Exists)?;
+            true
+        } else {
+            false
+        };
         let name = parse_qualified_table_name(parser)?;
         Ok(Statement::DropView(DropViewStatement { if_exists, name }))
     } else {
