@@ -1,0 +1,11 @@
+[package]
+name = "sqlflight"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, opinionated SQL formatter for Snowflake with first-class Jinja support"
+keywords = ["sql", "formatter", "snowflake", "jinja", "dbt"]
+categories = ["command-line-utilities", "development-tools"]
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
