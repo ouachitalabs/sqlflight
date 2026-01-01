@@ -90,13 +90,13 @@ impl Formatter {
         let has_star = stmt.columns.iter().any(|c| matches!(c.expr, Expression::Star | Expression::QualifiedStar(_)));
 
         // Can only inline if: no other clauses except simple WHERE with named columns
+        // Note: UNION doesn't force FROM to newline, each SELECT in UNION formats independently
         let has_extra_clauses = stmt.group_by.is_some()
             || stmt.having.is_some()
             || stmt.qualify.is_some()
             || stmt.window.is_some()
             || stmt.order_by.is_some()
             || stmt.limit.is_some()
-            || stmt.union.is_some()
             || !stmt.joins.is_empty();
 
         let simple_query = columns_inline
@@ -226,8 +226,8 @@ impl Formatter {
         }
 
         self.printer.write(" as (");
-        self.printer.newline();
         self.printer.indent();
+        self.printer.newline();
         self.format_select(&cte.query);
         self.printer.dedent();
         self.printer.newline();
