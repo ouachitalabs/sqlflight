@@ -6,11 +6,20 @@ pub mod rules;
 use crate::ast::*;
 use crate::error::Result;
 use crate::jinja;
-use crate::parser::lexer::{tokenize_with_comments, CommentToken};
+use crate::parser::lexer::{tokenize_with_comments, CommentToken, SpannedToken};
 use crate::parser::expr::Parser;
 use crate::parser::stmt;
 use printer::{Printer, TARGET_WIDTH};
 use rules::SELECT_COLUMN_THRESHOLD;
+
+/// Tracks the byte position boundaries of each parsed statement
+#[derive(Debug)]
+struct StatementBoundary {
+    /// Starting token index in the token stream
+    start_token_idx: usize,
+    /// Ending token index in the token stream (exclusive)
+    end_token_idx: usize,
+}
 
 /// Format SQL string
 pub fn format_sql(input: &str) -> Result<String> {
@@ -33,10 +42,11 @@ pub fn format_sql(input: &str) -> Result<String> {
     }
 
     // Parse ALL statements (not just the first one)
-    // Track which statements had trailing semicolons
+    // Track which statements had trailing semicolons and their boundaries
     let mut parser = Parser::new(&tokenize_result.tokens);
     let mut statements = Vec::new();
     let mut had_semicolons = Vec::new();
+    let mut boundaries = Vec::new();
 
     while !parser.is_eof() {
         // Skip any leading semicolons
@@ -48,7 +58,19 @@ pub fn format_sql(input: &str) -> Result<String> {
             break;
         }
 
+        // Track the starting position before parsing
+        let start_token_idx = parser.position();
+
         let ast = stmt::parse_statement(&mut parser)?;
+
+        // Track the ending position after parsing (before semicolon)
+        let end_token_idx = parser.position();
+
+        boundaries.push(StatementBoundary {
+            start_token_idx,
+            end_token_idx,
+        });
+
         statements.push(ast);
 
         // Consume optional trailing semicolon and track it
@@ -59,34 +81,110 @@ pub fn format_sql(input: &str) -> Result<String> {
         had_semicolons.push(had_semi);
     }
 
-    // Step 5: Format all ASTs
+    // Step 5: Map comments to statements using byte positions
+    let comment_placements = map_comments_to_statements(
+        &comments,
+        &boundaries,
+        &tokenize_result.spanned_tokens,
+    );
+
+    // Organize comments by type
+    let mut leading_comments: Vec<&CommentToken> = Vec::new();
+    let mut between_comments: Vec<Vec<&CommentToken>> = vec![Vec::new(); statements.len()];
+    let mut inline_hints: Vec<Vec<&CommentToken>> = vec![Vec::new(); statements.len()];
+    let mut trailing_comments: Vec<&CommentToken> = Vec::new();
+
+    for (placement, comment) in &comment_placements {
+        match placement {
+            CommentPlacement::Leading => leading_comments.push(*comment),
+            CommentPlacement::BetweenStatements(i) => {
+                if *i < between_comments.len() {
+                    between_comments[*i].push(*comment);
+                }
+            }
+            CommentPlacement::InlineHint(i) => {
+                if *i < inline_hints.len() {
+                    inline_hints[*i].push(*comment);
+                }
+            }
+            CommentPlacement::Trailing => trailing_comments.push(*comment),
+        }
+    }
+
+    // Step 6: Format all ASTs with their associated comments
     let mut formatted_parts = Vec::new();
     for (i, ast) in statements.iter().enumerate() {
         let mut formatted = format_ast(ast)?;
+
+        // Add inline hints right after SELECT/INSERT/UPDATE/DELETE/MERGE keywords
+        // For now, we'll prepend them as a separate line (Phase 3 will improve this)
+        let stmt_hints = &inline_hints[i];
+        if !stmt_hints.is_empty() {
+            // Insert hints into the formatted statement after the first keyword
+            formatted = insert_hints_after_keyword(&formatted, stmt_hints);
+        }
+
         // Add semicolon if the original had one and the statement doesn't already end with one
-        // (SELECT statements handle their own semicolons via stmt.semicolon field)
         if had_semicolons.get(i).copied().unwrap_or(false) {
             let trimmed = formatted.trim_end();
             if !trimmed.ends_with(';') {
                 formatted = format!("{};\n", trimmed);
             }
         }
+
+        // Add trailing comments that belong after this statement (between this and next)
+        let stmt_between_comments = &between_comments[i];
+        if !stmt_between_comments.is_empty() {
+            if !formatted.ends_with('\n') {
+                formatted.push('\n');
+            }
+            for comment in stmt_between_comments {
+                formatted.push_str(&comment.text);
+                formatted.push('\n');
+            }
+        }
+
         formatted_parts.push(formatted);
     }
 
-    // Join statements with blank lines between them
-    // Each statement already has its own trailing semicolon if it had one in the original
-    let formatted = if formatted_parts.len() == 1 {
-        formatted_parts.into_iter().next().unwrap()
-    } else {
-        formatted_parts.iter()
-            .map(|s| s.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n\n") + "\n"
-    };
+    // Build the final output with proper comment placement
+    let mut with_comments = String::new();
 
-    // Step 6: Interleave comments
-    let with_comments = interleave_comments(&jinja_info.body, &formatted, &comments);
+    // Add leading comments first
+    for comment in &leading_comments {
+        with_comments.push_str(&comment.text);
+        with_comments.push('\n');
+    }
+
+    // Join statements with blank lines between them
+    if formatted_parts.len() == 1 {
+        with_comments.push_str(&formatted_parts[0]);
+    } else {
+        for (i, part) in formatted_parts.iter().enumerate() {
+            if i > 0 {
+                // Add blank line before next statement (unless previous part already has comments)
+                if !with_comments.ends_with("\n\n") {
+                    with_comments.push('\n');
+                }
+            }
+            with_comments.push_str(part.trim_end());
+            with_comments.push('\n');
+        }
+    }
+
+    // Add trailing comments
+    for comment in &trailing_comments {
+        if !with_comments.ends_with('\n') {
+            with_comments.push('\n');
+        }
+        with_comments.push_str(&comment.text);
+        with_comments.push('\n');
+    }
+
+    // Ensure trailing newline
+    if !with_comments.ends_with('\n') {
+        with_comments.push('\n');
+    }
 
     // Step 7: Reconstruct with leading/trailing/inline placeholders
     let mut result = String::new();
@@ -248,71 +346,168 @@ fn extract_leading_placeholder(s: &str) -> Option<String> {
     None
 }
 
-/// Interleave comments into formatted output based on original positions
-///
-/// Currently, this uses a simple approach: comments at the start of the file
-/// (before any SQL) are preserved at the start, and other comments are
-/// appended at the end. This ensures the formatted SQL structure is not
-/// disrupted while still preserving all comments.
-fn interleave_comments(original: &str, formatted: &str, comments: &[CommentToken]) -> String {
-    if comments.is_empty() {
+/// Check if a comment is an SQL hint (e.g., /*+ PARALLEL(8) */)
+/// SQL hints must appear immediately after SELECT/INSERT/UPDATE/DELETE/MERGE keywords
+fn is_sql_hint(comment_text: &str) -> bool {
+    if !comment_text.starts_with("/*") {
+        return false;
+    }
+    // Remove /* prefix and check if it starts with +
+    let inner = comment_text.trim_start_matches("/*");
+    inner.trim_start().starts_with('+')
+}
+
+/// Determines how a comment should be placed relative to statements
+#[derive(Debug, Clone)]
+enum CommentPlacement {
+    /// Comment appears before all statements (leading comments)
+    Leading,
+    /// Comment is between statements i and i+1 (trailing comment for statement i)
+    BetweenStatements(usize),
+    /// Comment is an inline hint that should stay with statement i
+    InlineHint(usize),
+    /// Comment appears after all statements
+    Trailing,
+}
+
+/// Maps comments to their placement relative to statements based on byte positions
+fn map_comments_to_statements<'a>(
+    comments: &'a [CommentToken],
+    boundaries: &[StatementBoundary],
+    spanned_tokens: &[SpannedToken],
+) -> Vec<(CommentPlacement, &'a CommentToken)> {
+    let mut placements = Vec::new();
+
+    if boundaries.is_empty() {
+        // No statements, all comments are leading/trailing
+        for comment in comments {
+            placements.push((CommentPlacement::Leading, comment));
+        }
+        return placements;
+    }
+
+    for comment in comments {
+        let comment_byte_pos = comment.byte_start;
+
+        // Find the first statement that starts after this comment
+        let first_stmt_start_byte = if boundaries.is_empty() || spanned_tokens.is_empty() {
+            usize::MAX
+        } else if let Some(first_boundary) = boundaries.first() {
+            if first_boundary.start_token_idx < spanned_tokens.len() {
+                spanned_tokens[first_boundary.start_token_idx].span.start
+            } else {
+                usize::MAX
+            }
+        } else {
+            usize::MAX
+        };
+
+        // If comment is before first statement, it's a leading comment
+        if comment_byte_pos < first_stmt_start_byte {
+            placements.push((CommentPlacement::Leading, comment));
+            continue;
+        }
+
+        // Check if this is an inline hint within a statement
+        if is_sql_hint(&comment.text) {
+            // Find which statement contains this hint
+            for (i, boundary) in boundaries.iter().enumerate() {
+                if boundary.start_token_idx >= spanned_tokens.len() || boundary.end_token_idx == 0 {
+                    continue;
+                }
+
+                let stmt_start = spanned_tokens[boundary.start_token_idx].span.start;
+                // Use end_token_idx - 1 since end_token_idx is exclusive
+                let stmt_end_idx = boundary.end_token_idx.saturating_sub(1).min(spanned_tokens.len() - 1);
+                let stmt_end = spanned_tokens[stmt_end_idx].span.end;
+
+                if comment_byte_pos >= stmt_start && comment_byte_pos <= stmt_end {
+                    placements.push((CommentPlacement::InlineHint(i), comment));
+                    break;
+                }
+            }
+            // If no statement matched, treat as trailing
+            if placements.last().map_or(true, |(_, c)| *c != comment) {
+                placements.push((CommentPlacement::Trailing, comment));
+            }
+            continue;
+        }
+
+        // Find which statement(s) this comment is between
+        let mut placed = false;
+        for (i, boundary) in boundaries.iter().enumerate() {
+            if boundary.end_token_idx == 0 || boundary.end_token_idx > spanned_tokens.len() {
+                continue;
+            }
+
+            // Get the end position of the current statement
+            let stmt_end_idx = boundary.end_token_idx.saturating_sub(1).min(spanned_tokens.len() - 1);
+            let stmt_end = spanned_tokens[stmt_end_idx].span.end;
+
+            // Get the start position of the next statement (if any)
+            let next_stmt_start = if i + 1 < boundaries.len() {
+                let next_boundary = &boundaries[i + 1];
+                if next_boundary.start_token_idx < spanned_tokens.len() {
+                    spanned_tokens[next_boundary.start_token_idx].span.start
+                } else {
+                    usize::MAX
+                }
+            } else {
+                usize::MAX
+            };
+
+            // Comment is between this statement's end and next statement's start
+            if comment_byte_pos >= stmt_end && comment_byte_pos < next_stmt_start {
+                placements.push((CommentPlacement::BetweenStatements(i), comment));
+                placed = true;
+                break;
+            }
+        }
+
+        if !placed {
+            // Comment is after all statements
+            placements.push((CommentPlacement::Trailing, comment));
+        }
+    }
+
+    placements
+}
+
+/// Insert SQL hints after the first keyword (SELECT, INSERT, UPDATE, DELETE, MERGE)
+/// The hint should appear immediately after the keyword on the same line
+fn insert_hints_after_keyword(formatted: &str, hints: &[&CommentToken]) -> String {
+    if hints.is_empty() {
         return formatted.to_string();
     }
 
-    let original_lines: Vec<&str> = original.lines().collect();
+    // Find the first keyword position
+    let keywords = ["select", "insert", "update", "delete", "merge"];
+    let lower = formatted.to_lowercase();
 
-    // Find leading comments (before any SQL content)
-    let mut leading_comments: Vec<String> = Vec::new();
-    let mut other_comments: Vec<String> = Vec::new();
-    let mut first_sql_line = 0;
+    for keyword in &keywords {
+        if let Some(pos) = lower.find(keyword) {
+            let keyword_end = pos + keyword.len();
+            // Insert all hints after the keyword
+            let mut result = String::new();
+            result.push_str(&formatted[..keyword_end]);
 
-    // Find the first line that has non-comment, non-empty content
-    for (i, line) in original_lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*") {
-            first_sql_line = i;
-            break;
+            for hint in hints {
+                result.push(' ');
+                result.push_str(&hint.text);
+            }
+
+            result.push_str(&formatted[keyword_end..]);
+            return result;
         }
     }
 
-    // Classify comments as leading or other
-    for comment in comments {
-        let line_idx = comment.line.saturating_sub(1);
-        if line_idx < first_sql_line {
-            leading_comments.push(comment.text.clone());
-        } else {
-            other_comments.push(comment.text.clone());
-        }
-    }
-
+    // If no keyword found, just prepend the hints
     let mut result = String::new();
-
-    // Add leading comments first
-    for comment in &leading_comments {
-        result.push_str(comment);
+    for hint in hints {
+        result.push_str(&hint.text);
         result.push('\n');
     }
-
-    // Add the formatted SQL
     result.push_str(formatted);
-
-    // Add trailing comments (if any)
-    // We add a blank line before trailing comments for readability
-    if !other_comments.is_empty() {
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
-        for comment in &other_comments {
-            result.push_str(comment);
-            result.push('\n');
-        }
-    }
-
-    // Ensure trailing newline
-    if !result.ends_with('\n') {
-        result.push('\n');
-    }
-
     result
 }
 

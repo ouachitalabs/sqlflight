@@ -209,7 +209,9 @@ pub struct SpannedToken {
 pub struct CommentToken {
     pub text: String,
     pub line: usize,
-    pub is_block: bool,  // true for /* */, false for --
+    pub byte_start: usize,  // Byte position in source where comment starts
+    pub byte_end: usize,    // Byte position in source where comment ends
+    pub is_block: bool,     // true for /* */, false for --
 }
 
 /// Tokenize result with comments extracted
@@ -251,12 +253,14 @@ pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
                 let end_pos = input.len() - remaining.len();
                 let span = Span::new(start_pos, end_pos);
 
-                // Extract comments and store with line info
+                // Extract comments and store with line info and byte positions
                 match &token {
                     Token::SingleLineComment(text) => {
                         comments.push(CommentToken {
                             text: format!("--{}", text),
                             line: current_line,
+                            byte_start: start_pos,
+                            byte_end: end_pos,
                             is_block: false,
                         });
                         // Count newlines in the comment text
@@ -266,6 +270,8 @@ pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
                         comments.push(CommentToken {
                             text: format!("/*{}*/", text),
                             line: current_line,
+                            byte_start: start_pos,
+                            byte_end: end_pos,
                             is_block: true,
                         });
                         // Count newlines in the comment text
@@ -275,6 +281,8 @@ pub fn tokenize_with_comments(input: &str) -> crate::Result<TokenizeResult> {
                         comments.push(CommentToken {
                             text: format!("{{# {} #}}", text.trim()),
                             line: current_line,
+                            byte_start: start_pos,
+                            byte_end: end_pos,
                             is_block: true,
                         });
                         current_line += text.chars().filter(|c| *c == '\n').count();

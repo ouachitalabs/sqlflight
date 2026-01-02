@@ -855,14 +855,16 @@ mod semicolons {
 mod comments {
     use super::*;
 
-    // Note: Comments are currently handled with a simple approach:
+    // Comments are handled with position-aware placement:
     // - Leading comments (before any SQL) are preserved at the start
-    // - Other comments are moved to the end of the formatted output
-    // This ensures SQL formatting is correct even if comment positions change.
+    // - Comments between statements stay between statements
+    // - SQL hints (/*+ ... */) stay inline after the keyword
+    // - Trailing comments go at the end
+    // - Comments within a single statement go after that statement
 
     #[test]
     fn single_line_comment_preserved() {
-        // Trailing comment is moved to end of output
+        // Trailing comment goes after the statement
         assert_formats_to(
             "SELECT id -- user identifier\nFROM users",
             "select id from users
@@ -872,7 +874,7 @@ mod comments {
 
     #[test]
     fn multi_line_comment_preserved() {
-        // Inline comment is moved to end of output
+        // Inline comment goes after the statement
         assert_formats_to(
             "SELECT /* all columns */ * FROM users",
             "select * from users
@@ -892,7 +894,7 @@ select * from users",
 
     #[test]
     fn comment_after_statement() {
-        // Trailing comment is moved to end
+        // Trailing comment goes after the statement
         assert_formats_to(
             "SELECT * FROM users -- fetch users",
             "select * from users
@@ -902,7 +904,7 @@ select * from users",
 
     #[test]
     fn comment_between_clauses() {
-        // Comment between clauses is moved to end
+        // Comment within a single statement goes after the statement
         assert_formats_to(
             "SELECT *\n-- filter condition\nFROM users\nWHERE active = true",
             "select *
@@ -914,13 +916,103 @@ where active = true
 
     #[test]
     fn multi_line_block_comment() {
-        // Multi-line block comment is moved to end
+        // Multi-line block comment within statement goes after
         assert_formats_to(
             "SELECT *\n/* This is a\n   multi-line\n   comment */\nFROM users",
             "select * from users
 /* This is a
    multi-line
    comment */",
+        );
+    }
+
+    // New tests for multi-statement comment handling
+
+    #[test]
+    fn comment_between_statements() {
+        // Comment between two statements stays between them
+        assert_formats_to(
+            "SELECT id FROM users;\n-- Comment between statements\nSELECT name FROM products;",
+            "select id from users;
+-- Comment between statements
+
+select name from products;",
+        );
+    }
+
+    #[test]
+    fn multiple_comments_between_statements() {
+        // Multiple comments between statements all stay between them
+        assert_formats_to(
+            "SELECT id FROM users;\n-- Comment 1\n-- Comment 2\nSELECT name FROM products;",
+            "select id from users;
+-- Comment 1
+-- Comment 2
+
+select name from products;",
+        );
+    }
+
+    #[test]
+    fn block_comment_between_statements() {
+        // Block comment between statements stays between them
+        assert_formats_to(
+            "SELECT id FROM users;\n/* Between statements */\nSELECT name FROM products;",
+            "select id from users;
+/* Between statements */
+
+select name from products;",
+        );
+    }
+
+    // SQL hint tests
+
+    #[test]
+    fn sql_hint_preserved_inline() {
+        // SQL hints stay inline after the SELECT keyword
+        assert_formats_to(
+            "SELECT /*+ PARALLEL(8) */ * FROM users",
+            "select /*+ PARALLEL(8) */ * from users",
+        );
+    }
+
+    #[test]
+    fn sql_hint_with_multiple_hints() {
+        // Multiple SQL hints in same statement
+        assert_formats_to(
+            "SELECT /*+ PARALLEL(8) */ /*+ APPEND */ * FROM users",
+            "select /*+ PARALLEL(8) */ /*+ APPEND */ * from users",
+        );
+    }
+
+    #[test]
+    fn sql_hint_in_insert() {
+        // SQL hint in INSERT statement
+        assert_formats_to(
+            "INSERT /*+ APPEND */ INTO users (id) VALUES (1)",
+            "insert /*+ APPEND */ into users (id)
+values (1)",
+        );
+    }
+
+    #[test]
+    fn comment_at_end_of_file() {
+        // Comment after last statement stays at end
+        assert_formats_to(
+            "SELECT * FROM users;\n-- Final comment",
+            "select * from users;
+-- Final comment",
+        );
+    }
+
+    #[test]
+    fn leading_and_trailing_comments() {
+        // Both leading and trailing comments are preserved
+        assert_formats_to(
+            "-- Header comment\nSELECT * FROM users\n-- Footer comment",
+            "-- Header comment
+select * from users
+-- Footer comment",
         );
     }
 }
