@@ -147,68 +147,158 @@ pub fn format_sql(input: &str) -> Result<String> {
         formatted_parts.push(formatted);
     }
 
-    // Build the final output with proper comment placement
-    let mut with_comments = String::new();
+    // Step 7: Reconstruct with leading/trailing/inline Jinja placeholders
+    // We need to categorize inline placeholders by where they appear:
+    // - Before first statement (leading)
+    // - Between statement i and i+1
+    // - After last statement (trailing)
 
-    // Add leading comments first
-    for comment in &leading_comments {
-        with_comments.push_str(&comment.text);
-        with_comments.push('\n');
+    // Helper function to get original line number for a comment (tokenizer is 1-indexed)
+    let get_original_line = |comment_line: usize| -> usize {
+        let body_line = comment_line.saturating_sub(1);
+        if body_line < jinja_info.body_to_original_line.len() {
+            jinja_info.body_to_original_line[body_line]
+        } else {
+            let last_mapped = jinja_info.body_to_original_line.last().copied().unwrap_or(0);
+            let diff = body_line.saturating_sub(jinja_info.body_to_original_line.len().saturating_sub(1));
+            last_mapped + diff
+        }
+    };
+
+    // Find the original line where each statement starts
+    // We look at the first token of each statement and find its line in the body
+    let mut statement_start_lines: Vec<usize> = Vec::new();
+    for (_stmt_idx, boundary) in boundaries.iter().enumerate() {
+        if boundary.start_token_idx < tokenize_result.spanned_tokens.len() {
+            let span = &tokenize_result.spanned_tokens[boundary.start_token_idx].span;
+            // Find which body line this byte position corresponds to
+            let body_before = &jinja_info.body[..span.start.min(jinja_info.body.len())];
+            let body_line = body_before.matches('\n').count(); // 0-indexed body line
+            if body_line < jinja_info.body_to_original_line.len() {
+                let original_line = jinja_info.body_to_original_line[body_line];
+                statement_start_lines.push(original_line);
+            } else {
+                // Fallback: extrapolate
+                let last = jinja_info.body_to_original_line.last().copied().unwrap_or(0);
+                statement_start_lines.push(last + 1);
+            }
+        }
     }
 
-    // Join statements with blank lines between them
-    if formatted_parts.len() == 1 {
-        with_comments.push_str(&formatted_parts[0]);
-    } else {
-        for (i, part) in formatted_parts.iter().enumerate() {
-            if i > 0 {
-                // Add blank line before next statement (unless previous part already has comments)
-                if !with_comments.ends_with("\n\n") {
-                    with_comments.push('\n');
+    // Categorize inline placeholders by their position relative to statements
+    let mut leading_inline: Vec<String> = Vec::new();
+    let mut between_inline: Vec<Vec<String>> = vec![Vec::new(); statements.len()];
+    let mut trailing_inline: Vec<String> = Vec::new();
+
+    for (original_line, placeholder) in &jinja_info.inline_statements {
+        let original_line = *original_line;
+        if statement_start_lines.is_empty() {
+            leading_inline.push(placeholder.clone());
+        } else if original_line < statement_start_lines[0] {
+            // Before first statement
+            leading_inline.push(placeholder.clone());
+        } else {
+            // Find which gap it belongs to
+            let mut placed = false;
+            for i in 0..statement_start_lines.len() {
+                let next_start = if i + 1 < statement_start_lines.len() {
+                    statement_start_lines[i + 1]
+                } else {
+                    usize::MAX
+                };
+                if original_line < next_start {
+                    // Belongs after statement i (in between_inline[i])
+                    if i < between_inline.len() {
+                        between_inline[i].push(placeholder.clone());
+                    }
+                    placed = true;
+                    break;
                 }
             }
-            with_comments.push_str(part.trim_end());
-            with_comments.push('\n');
+            if !placed {
+                trailing_inline.push(placeholder.clone());
+            }
         }
     }
 
-    // Add trailing comments
-    for comment in &trailing_comments {
-        if !with_comments.ends_with('\n') {
-            with_comments.push('\n');
-        }
-        with_comments.push_str(&comment.text);
-        with_comments.push('\n');
-    }
-
-    // Ensure trailing newline
-    if !with_comments.ends_with('\n') {
-        with_comments.push('\n');
-    }
-
-    // Step 7: Reconstruct with leading/trailing/inline placeholders
+    // Build result with proper interleaving
     let mut result = String::new();
 
-    // Add leading placeholders
+    // Add leading Jinja placeholders from extraction
     for placeholder in &jinja_info.leading {
         result.push_str(placeholder);
         result.push('\n');
     }
 
-    // Add formatted SQL with inline placeholders reinserted
-    if jinja_info.inline_statements.is_empty() {
-        result.push_str(&with_comments);
-    } else {
-        // Reinsert inline placeholders at approximately the right positions
-        // Map inline placeholders back to formatted output
-        // This is approximate - we preserve them relative to their line context
-        for (_line_num, placeholder) in &jinja_info.inline_statements {
-            // For now, insert inline placeholders at the start of the formatted output
-            // This preserves them but may not maintain exact positioning
-            result.push_str(placeholder);
+    // Collect leading comments and inline placeholders, sorted by original line
+    #[derive(Debug)]
+    enum LeadingItem {
+        Comment(String),
+        Placeholder(String),
+    }
+    let mut leading_items: Vec<(usize, LeadingItem)> = Vec::new();
+
+    for comment in &leading_comments {
+        let original_line = get_original_line(comment.line);
+        leading_items.push((original_line, LeadingItem::Comment(comment.text.clone())));
+    }
+    for placeholder in &leading_inline {
+        // Find original line for this placeholder
+        for (orig_line, ph) in &jinja_info.inline_statements {
+            if ph == placeholder {
+                leading_items.push((*orig_line, LeadingItem::Placeholder(placeholder.clone())));
+                break;
+            }
+        }
+    }
+    leading_items.sort_by_key(|(line, _)| *line);
+
+    for (_, item) in leading_items {
+        match item {
+            LeadingItem::Comment(text) => {
+                result.push_str(&text);
+                result.push('\n');
+            }
+            LeadingItem::Placeholder(text) => {
+                result.push_str(&text);
+                result.push('\n');
+            }
+        }
+    }
+
+    // Add statements with their between-comments and between-inline-placeholders
+    for (i, formatted) in formatted_parts.into_iter().enumerate() {
+        if i > 0 && !result.ends_with("\n\n") {
             result.push('\n');
         }
-        result.push_str(&with_comments);
+        result.push_str(formatted.trim_end());
+        result.push('\n');
+
+        // Add inline placeholders that belong after this statement
+        if i < between_inline.len() {
+            for placeholder in &between_inline[i] {
+                result.push_str(placeholder);
+                result.push('\n');
+            }
+        }
+    }
+
+    // Add trailing SQL comments
+    for comment in &trailing_comments {
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&comment.text);
+        result.push('\n');
+    }
+
+    // Add trailing inline placeholders
+    for placeholder in &trailing_inline {
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(placeholder);
+        result.push('\n');
     }
 
     // Add trailing placeholders
@@ -233,15 +323,17 @@ struct JinjaLineInfo {
     body: String,
     /// Placeholders after the SQL ends
     trailing: Vec<String>,
-    /// Placeholders on their own lines within the SQL (with their line positions)
+    /// Placeholders on their own lines within the SQL (with their ORIGINAL line positions)
     inline_statements: Vec<(usize, String)>,
+    /// Maps body line numbers to original line numbers (for proper interleaving)
+    body_to_original_line: Vec<usize>,
 }
 
 /// Extract Jinja placeholders that appear at statement level (before/after/within SQL)
 fn extract_statement_level_placeholders(input: &str) -> JinjaLineInfo {
     let mut leading = Vec::new();
     let mut trailing = Vec::new();
-    let inline_statements = Vec::new();
+    let mut inline_statements = Vec::new();
     let mut body = input.to_string();
 
     // First, extract inline leading placeholders (at the very start, no newline)
@@ -296,15 +388,39 @@ fn extract_statement_level_placeholders(input: &str) -> JinjaLineInfo {
         }
     }
 
-    // Keep all lines in the body - placeholders within the SQL are treated as identifiers
-    // Only leading/trailing placeholders are extracted
-    let final_body = lines[body_start..body_end].join("\n");
+    // Extract inline placeholders from the middle of the body
+    // These are Jinja-only statements that appear after comments or between SQL statements
+    // Also build a mapping from body line numbers to original line numbers
+    //
+    // IMPORTANT: Only extract placeholders that are NOT part of SQL continuations.
+    // A placeholder is part of SQL if:
+    // - The previous non-empty line ends with SQL continuation (comma, AND, OR, etc.)
+    // - The next non-empty line starts with SQL continuation (FROM, JOIN, WHERE, etc.)
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut body_to_original_line: Vec<usize> = Vec::new();
+
+    let relevant_lines = &lines[body_start..body_end];
+    for (i, line) in relevant_lines.iter().enumerate() {
+        let original_line = body_start + i;
+        let trimmed = line.trim();
+        if is_pure_placeholder_line(trimmed) && is_statement_level_placeholder(relevant_lines, i) {
+            // Track the placeholder with its ORIGINAL position
+            inline_statements.push((original_line, trimmed.to_string()));
+            // Skip this line (don't include in body_lines)
+        } else {
+            body_lines.push(*line);
+            body_to_original_line.push(original_line);
+        }
+    }
+
+    let final_body = body_lines.join("\n");
 
     JinjaLineInfo {
         leading,
-        body: final_body.trim().to_string(),
+        body: final_body, // Don't trim - it affects line number calculations
         trailing,
         inline_statements,
+        body_to_original_line,
     }
 }
 
@@ -327,6 +443,60 @@ fn is_pure_placeholder_line(line: &str) -> bool {
         return end == trimmed.len();
     }
     false
+}
+
+/// Check if a placeholder line is at statement level (not inline within SQL)
+/// A placeholder is statement-level if:
+/// - It's not preceded by SQL continuation (comma, open paren, operators)
+/// - It's not followed by SQL continuation (FROM, JOIN, WHERE, etc.)
+fn is_statement_level_placeholder(lines: &[&str], placeholder_idx: usize) -> bool {
+    // SQL tokens that indicate continuation (placeholder is inline, not statement-level)
+    const SQL_CONTINUATION_ENDINGS: &[&str] = &[",", "(", "AND", "OR", "+", "-", "*", "/", "||", "=", "<", ">", "!=", "<>", "THEN", "ELSE", "WHEN", "AS"];
+    const SQL_CONTINUATION_STARTS: &[&str] = &["FROM", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT", ")", "AND", "OR", "ON", "USING", "THEN", "ELSE", "WHEN", "END"];
+
+    // Find previous non-empty, non-comment, non-placeholder line
+    let mut prev_sql = None;
+    for i in (0..placeholder_idx).rev() {
+        let trimmed = lines[i].trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("--") && !is_pure_placeholder_line(trimmed) {
+            prev_sql = Some(trimmed);
+            break;
+        }
+    }
+
+    // Find next non-empty, non-comment, non-placeholder line
+    let mut next_sql = None;
+    for i in (placeholder_idx + 1)..lines.len() {
+        let trimmed = lines[i].trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("--") && !is_pure_placeholder_line(trimmed) {
+            next_sql = Some(trimmed);
+            break;
+        }
+    }
+
+    // Check if previous line ends with SQL continuation
+    if let Some(prev) = prev_sql {
+        let prev_upper = prev.to_uppercase();
+        for ending in SQL_CONTINUATION_ENDINGS {
+            if prev_upper.ends_with(ending) || prev.ends_with(ending.to_lowercase().as_str()) {
+                return false; // Inline SQL
+            }
+        }
+    }
+
+    // Check if next line starts with SQL continuation
+    if let Some(next) = next_sql {
+        let next_upper = next.to_uppercase();
+        let first_word = next_upper.split_whitespace().next().unwrap_or("");
+        for start in SQL_CONTINUATION_STARTS {
+            if first_word == *start || next.starts_with(*start) || next.starts_with(&start.to_lowercase()) {
+                return false; // Inline SQL
+            }
+        }
+    }
+
+    // If we get here, the placeholder is at statement level
+    true
 }
 
 /// Extract a Jinja placeholder from the start of a string
@@ -2589,5 +2759,317 @@ fn format_identifier(s: &str) -> String {
         s.to_lowercase()
     } else {
         s.to_lowercase()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to simulate placeholder extraction from Jinja-extracted input
+    fn extract_test(input: &str) -> JinjaLineInfo {
+        extract_statement_level_placeholders(input)
+    }
+
+    // ===============================================
+    // Tests for extract_statement_level_placeholders
+    // ===============================================
+
+    mod leading_placeholder_tests {
+        use super::*;
+
+        #[test]
+        fn test_leading_placeholder_only() {
+            let input = "__SQLFLIGHT_JINJA_001__";
+            let result = extract_test(input);
+            assert_eq!(result.leading, vec!["__SQLFLIGHT_JINJA_001__"]);
+            assert!(result.body.trim().is_empty());
+            assert!(result.trailing.is_empty());
+            assert!(result.inline_statements.is_empty());
+        }
+
+        #[test]
+        fn test_leading_placeholder_with_sql() {
+            let input = "__SQLFLIGHT_JINJA_001__\nSELECT 1;";
+            let result = extract_test(input);
+            assert_eq!(result.leading, vec!["__SQLFLIGHT_JINJA_001__"]);
+            assert!(result.body.contains("SELECT 1;"));
+            assert!(result.trailing.is_empty());
+        }
+
+        #[test]
+        fn test_multiple_leading_placeholders() {
+            let input = "__SQLFLIGHT_JINJA_001__\n__SQLFLIGHT_JINJA_002__\nSELECT 1;";
+            let result = extract_test(input);
+            assert_eq!(result.leading.len(), 2);
+            assert_eq!(result.leading[0], "__SQLFLIGHT_JINJA_001__");
+            assert_eq!(result.leading[1], "__SQLFLIGHT_JINJA_002__");
+            assert!(result.body.contains("SELECT 1;"));
+        }
+
+        #[test]
+        fn test_leading_placeholder_with_whitespace() {
+            let input = "  __SQLFLIGHT_JINJA_001__  \nSELECT 1;";
+            let result = extract_test(input);
+            assert_eq!(result.leading, vec!["__SQLFLIGHT_JINJA_001__"]);
+        }
+    }
+
+    mod trailing_placeholder_tests {
+        use super::*;
+
+        #[test]
+        fn test_trailing_placeholder_only() {
+            let input = "__SQLFLIGHT_JINJA_001__";
+            let result = extract_test(input);
+            // A single placeholder can be leading or trailing - we treat it as leading
+            assert_eq!(result.leading, vec!["__SQLFLIGHT_JINJA_001__"]);
+        }
+
+        #[test]
+        fn test_trailing_placeholder_with_sql() {
+            let input = "SELECT 1;\n__SQLFLIGHT_JINJA_001__";
+            let result = extract_test(input);
+            assert!(result.leading.is_empty());
+            assert!(result.body.contains("SELECT 1;"));
+            assert_eq!(result.trailing, vec!["__SQLFLIGHT_JINJA_001__"]);
+        }
+
+        #[test]
+        fn test_multiple_trailing_placeholders() {
+            let input = "SELECT 1;\n__SQLFLIGHT_JINJA_001__\n__SQLFLIGHT_JINJA_002__";
+            let result = extract_test(input);
+            assert!(result.leading.is_empty());
+            assert!(result.body.contains("SELECT 1;"));
+            assert_eq!(result.trailing.len(), 2);
+        }
+
+        #[test]
+        fn test_trailing_placeholder_with_whitespace() {
+            let input = "SELECT 1;\n  __SQLFLIGHT_JINJA_001__  ";
+            let result = extract_test(input);
+            assert_eq!(result.trailing, vec!["__SQLFLIGHT_JINJA_001__"]);
+        }
+    }
+
+    mod inline_placeholder_tests {
+        use super::*;
+
+        #[test]
+        fn test_inline_placeholder_after_comment() {
+            let input = "-- comment\n__SQLFLIGHT_JINJA_001__\nSELECT 1;";
+            let result = extract_test(input);
+            assert!(result.leading.is_empty());
+            assert_eq!(result.inline_statements.len(), 1);
+            assert_eq!(result.inline_statements[0].1, "__SQLFLIGHT_JINJA_001__");
+            // Body should contain the comment but not the placeholder
+            assert!(result.body.contains("-- comment"));
+            assert!(!result.body.contains("__SQLFLIGHT_JINJA_001__"));
+        }
+
+        #[test]
+        fn test_inline_placeholder_between_statements() {
+            let input = "SELECT 1;\n__SQLFLIGHT_JINJA_001__\nSELECT 2;";
+            let result = extract_test(input);
+            assert!(result.leading.is_empty());
+            assert_eq!(result.inline_statements.len(), 1);
+            assert_eq!(result.inline_statements[0].1, "__SQLFLIGHT_JINJA_001__");
+        }
+
+        #[test]
+        fn test_multiple_inline_placeholders() {
+            let input = "SELECT 1;\n__SQLFLIGHT_JINJA_001__\n__SQLFLIGHT_JINJA_002__\nSELECT 2;";
+            let result = extract_test(input);
+            assert_eq!(result.inline_statements.len(), 2);
+        }
+
+        #[test]
+        fn test_inline_placeholder_tracks_line_number() {
+            let input = "-- comment\n__SQLFLIGHT_JINJA_001__\nSELECT 1;";
+            let result = extract_test(input);
+            // The placeholder is on line 1 (0-indexed)
+            assert_eq!(result.inline_statements[0].0, 1);
+        }
+    }
+
+    mod mixed_placeholder_tests {
+        use super::*;
+
+        #[test]
+        fn test_mixed_leading_inline_trailing() {
+            let input = "__SQLFLIGHT_JINJA_001__\nSELECT 1;\n__SQLFLIGHT_JINJA_002__\nSELECT 2;\n__SQLFLIGHT_JINJA_003__";
+            let result = extract_test(input);
+            assert_eq!(result.leading, vec!["__SQLFLIGHT_JINJA_001__"]);
+            assert_eq!(result.inline_statements.len(), 1);
+            assert_eq!(result.inline_statements[0].1, "__SQLFLIGHT_JINJA_002__");
+            assert_eq!(result.trailing, vec!["__SQLFLIGHT_JINJA_003__"]);
+        }
+
+        #[test]
+        fn test_comments_and_placeholders() {
+            let input = "-- c1\n__SQLFLIGHT_JINJA_001__\n-- c2\n__SQLFLIGHT_JINJA_002__\nSELECT 1;";
+            let result = extract_test(input);
+            // Inline placeholders extracted
+            assert_eq!(result.inline_statements.len(), 2);
+            // Body should contain comments but not placeholders
+            assert!(result.body.contains("-- c1"));
+            assert!(result.body.contains("-- c2"));
+        }
+
+        #[test]
+        fn test_leading_placeholder_then_comment_then_inline() {
+            let input = "__SQLFLIGHT_JINJA_001__\n-- comment\n__SQLFLIGHT_JINJA_002__\nSELECT 1;";
+            let result = extract_test(input);
+            assert_eq!(result.leading, vec!["__SQLFLIGHT_JINJA_001__"]);
+            assert_eq!(result.inline_statements.len(), 1);
+            assert_eq!(result.inline_statements[0].1, "__SQLFLIGHT_JINJA_002__");
+        }
+    }
+
+    // ===============================================
+    // Tests for is_statement_level_placeholder
+    // ===============================================
+
+    mod is_statement_level_tests {
+        use super::*;
+
+        #[test]
+        fn test_placeholder_after_semicolon_is_statement_level() {
+            let lines = vec!["SELECT 1;", "__SQLFLIGHT_JINJA_001__", "SELECT 2;"];
+            assert!(is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_after_comma_is_not_statement_level() {
+            let lines = vec!["SELECT a,", "__SQLFLIGHT_JINJA_001__", "FROM t;"];
+            assert!(!is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_before_from_is_not_statement_level() {
+            let lines = vec!["SELECT __SQLFLIGHT_JINJA_001__", "__SQLFLIGHT_JINJA_002__", "FROM t;"];
+            assert!(!is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_after_comment_is_statement_level() {
+            let lines = vec!["-- comment", "__SQLFLIGHT_JINJA_001__", "SELECT 1;"];
+            assert!(is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_after_open_paren_is_not_statement_level() {
+            let lines = vec!["SELECT (", "__SQLFLIGHT_JINJA_001__", ") FROM t;"];
+            assert!(!is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_before_where_is_not_statement_level() {
+            let lines = vec!["SELECT *", "__SQLFLIGHT_JINJA_001__", "WHERE x = 1;"];
+            assert!(!is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_alone_is_statement_level() {
+            let lines = vec!["__SQLFLIGHT_JINJA_001__"];
+            assert!(is_statement_level_placeholder(&lines, 0));
+        }
+
+        #[test]
+        fn test_placeholder_after_and_is_not_statement_level() {
+            let lines = vec!["WHERE a = 1 AND", "__SQLFLIGHT_JINJA_001__", ";"];
+            assert!(!is_statement_level_placeholder(&lines, 1));
+        }
+
+        #[test]
+        fn test_placeholder_before_join_is_not_statement_level() {
+            let lines = vec!["SELECT * FROM a", "__SQLFLIGHT_JINJA_001__", "JOIN b ON a.id = b.id;"];
+            assert!(!is_statement_level_placeholder(&lines, 1));
+        }
+    }
+
+    // ===============================================
+    // Tests for body_to_original_line mapping
+    // ===============================================
+
+    mod line_mapping_tests {
+        use super::*;
+
+        #[test]
+        fn test_body_to_original_line_basic() {
+            let input = "__SQLFLIGHT_JINJA_001__\nSELECT 1;\nSELECT 2;";
+            let result = extract_test(input);
+            // Leading placeholder is extracted, body contains the SQL
+            // The mapping tracks original line numbers
+            assert!(!result.body_to_original_line.is_empty());
+            // Body starts after the leading placeholder
+            // First body line (SELECT 1;) maps to original line 1
+            // But we map from the start of the body segment
+            assert!(!result.body.is_empty());
+        }
+
+        #[test]
+        fn test_body_to_original_line_with_inline() {
+            let input = "-- comment\n__SQLFLIGHT_JINJA_001__\nSELECT 1;";
+            let result = extract_test(input);
+            // Body has "-- comment", empty line, and "SELECT 1;" (placeholder was removed)
+            // Body line 0 = -- comment = original line 0
+            assert_eq!(result.body_to_original_line[0], 0);
+            // Check that the mapping has entries
+            assert!(result.body_to_original_line.len() >= 2);
+        }
+
+        #[test]
+        fn test_body_to_original_line_preserves_empty_lines() {
+            let input = "SELECT 1;\n\nSELECT 2;";
+            let result = extract_test(input);
+            assert_eq!(result.body_to_original_line.len(), 3);
+            assert_eq!(result.body_to_original_line[0], 0);
+            assert_eq!(result.body_to_original_line[1], 1); // empty line
+            assert_eq!(result.body_to_original_line[2], 2);
+        }
+    }
+
+    // ===============================================
+    // Tests for is_pure_placeholder_line
+    // ===============================================
+
+    mod is_pure_placeholder_line_tests {
+        use super::*;
+
+        #[test]
+        fn test_pure_placeholder() {
+            assert!(is_pure_placeholder_line("__SQLFLIGHT_JINJA_001__"));
+        }
+
+        #[test]
+        fn test_placeholder_with_whitespace() {
+            assert!(is_pure_placeholder_line("  __SQLFLIGHT_JINJA_001__  "));
+        }
+
+        #[test]
+        fn test_placeholder_with_other_text() {
+            assert!(!is_pure_placeholder_line("SELECT __SQLFLIGHT_JINJA_001__"));
+        }
+
+        #[test]
+        fn test_placeholder_in_middle() {
+            assert!(!is_pure_placeholder_line("a __SQLFLIGHT_JINJA_001__ b"));
+        }
+
+        #[test]
+        fn test_empty_line() {
+            assert!(!is_pure_placeholder_line(""));
+        }
+
+        #[test]
+        fn test_comment_only() {
+            assert!(!is_pure_placeholder_line("-- comment"));
+        }
+
+        #[test]
+        fn test_non_placeholder() {
+            assert!(!is_pure_placeholder_line("SELECT 1"));
+        }
     }
 }

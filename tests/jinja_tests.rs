@@ -857,3 +857,367 @@ WHERE order_date > {{ var('max_order_date') }}
         assert!(result.contains("{{ var('max_order_date') }}"));
     }
 }
+
+// =============================================================================
+// JINJA STATEMENT LEVEL PRESERVATION TESTS
+// Tests for the bug fix where Jinja statements after comments were lost
+// =============================================================================
+
+mod jinja_statement_level {
+    use super::*;
+
+    // Basic Jinja set statement tests
+
+    #[test]
+    fn jinja_set_at_start() {
+        let input = "{% set x = 1 %}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set x = 1 %}"));
+        assert!(result.contains("select 1;"));
+    }
+
+    #[test]
+    fn jinja_set_after_comment() {
+        // This was the main bug - {% set %} after comment was lost
+        let input = "-- comment\n{% set x = 1 %}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- comment"), "Comment should be preserved");
+        assert!(result.contains("{% set x = 1 %}"), "Jinja set should be preserved");
+        assert!(result.contains("select 1;"), "SQL should be preserved");
+    }
+
+    #[test]
+    fn jinja_set_between_statements() {
+        let input = "SELECT 1;\n{% set x = 1 %}\nSELECT 2;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("select 1;"));
+        assert!(result.contains("{% set x = 1 %}"));
+        assert!(result.contains("select 2;"));
+    }
+
+    #[test]
+    fn jinja_set_after_multiple_comments() {
+        let input = "-- c1\n-- c2\n{% set x = 1 %}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- c1"));
+        assert!(result.contains("-- c2"));
+        assert!(result.contains("{% set x = 1 %}"));
+    }
+
+    #[test]
+    fn multiple_jinja_sets_at_start() {
+        let input = "{% set a = 1 %}\n{% set b = 2 %}\nSELECT {{ a }}, {{ b }};";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set a = 1 %}"));
+        assert!(result.contains("{% set b = 2 %}"));
+    }
+
+    #[test]
+    fn jinja_set_with_complex_value() {
+        let input = "{% set cols = ['a', 'b', 'c'] %}\nSELECT {{ cols | join(', ') }} FROM t;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set cols = ['a', 'b', 'c'] %}"));
+        assert!(result.contains("{{ cols | join(', ') }}"));
+    }
+
+    // Jinja for loop tests
+
+    #[test]
+    fn jinja_for_at_start() {
+        let input = "{% for i in range(3) %}\nSELECT {{ i }};\n{% endfor %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% for"));
+        assert!(result.contains("{% endfor %}"));
+    }
+
+    #[test]
+    fn jinja_for_after_comment() {
+        let input = "-- comment\n{% for i in range(3) %}\nSELECT {{ i }};\n{% endfor %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- comment"));
+        assert!(result.contains("{% for"));
+    }
+
+    #[test]
+    fn jinja_for_between_statements() {
+        let input = "SELECT 1;\n{% for i in range(3) %}\nSELECT {{ i }};\n{% endfor %}\nSELECT 2;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("select 1;"));
+        assert!(result.contains("{% for"));
+        assert!(result.contains("select 2;"));
+    }
+
+    // Jinja if block tests
+
+    #[test]
+    fn jinja_if_at_start() {
+        let input = "{% if condition %}\nSELECT 1;\n{% endif %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% if"));
+        assert!(result.contains("{% endif %}"));
+    }
+
+    #[test]
+    fn jinja_if_after_comment() {
+        let input = "-- comment\n{% if condition %}\nSELECT 1;\n{% endif %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- comment"));
+        assert!(result.contains("{% if"));
+    }
+
+    #[test]
+    fn jinja_if_elif_else() {
+        let input = "{% if a %}\nSELECT 1;\n{% elif b %}\nSELECT 2;\n{% else %}\nSELECT 3;\n{% endif %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% if"));
+        assert!(result.contains("{% elif"));
+        assert!(result.contains("{% else %}"));
+        assert!(result.contains("{% endif %}"));
+    }
+
+    // Mixed Jinja types tests
+
+    #[test]
+    fn set_then_for() {
+        let input = "{% set x = 1 %}\n{% for i in range(3) %}\nSELECT {{ i }};\n{% endfor %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set"));
+        assert!(result.contains("{% for"));
+    }
+
+    #[test]
+    fn comment_set_for_sql() {
+        let input = "-- comment\n{% set x = 1 %}\n{% for i in range(3) %}\nSELECT {{ i }};\n{% endfor %}\nSELECT 99;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- comment"));
+        assert!(result.contains("{% set"));
+        assert!(result.contains("{% for"));
+        assert!(result.contains("select 99;"));
+    }
+
+    // Comment positioning tests
+
+    #[test]
+    fn comment_before_first_statement() {
+        let input = "-- comment\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- comment"));
+        assert!(result.contains("select 1;"));
+    }
+
+    #[test]
+    fn comment_between_statements() {
+        let input = "SELECT 1;\n-- between\nSELECT 2;";
+        let result = format(input).expect("format should succeed");
+        // Comment should appear between the two selects
+        let s1_pos = result.find("select 1").unwrap();
+        let comment_pos = result.find("-- between").unwrap();
+        let s2_pos = result.find("select 2").unwrap();
+        assert!(s1_pos < comment_pos, "Comment should be after first SELECT");
+        assert!(comment_pos < s2_pos, "Comment should be before second SELECT");
+    }
+
+    #[test]
+    fn multiple_comments_between_statements() {
+        let input = "SELECT 1;\n-- c1\n-- c2\n-- c3\nSELECT 2;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- c1"));
+        assert!(result.contains("-- c2"));
+        assert!(result.contains("-- c3"));
+        let s1_pos = result.find("select 1").unwrap();
+        let c1_pos = result.find("-- c1").unwrap();
+        let s2_pos = result.find("select 2").unwrap();
+        assert!(s1_pos < c1_pos && c1_pos < s2_pos);
+    }
+
+    #[test]
+    fn comment_after_jinja_set() {
+        let input = "{% set x = 1 %}\n-- comment\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set"));
+        assert!(result.contains("-- comment"));
+        assert!(result.contains("select 1"));
+    }
+
+    #[test]
+    fn comment_before_and_after_jinja() {
+        let input = "-- before\n{% set x = 1 %}\n-- after\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        // All should be present
+        assert!(result.contains("-- before"));
+        assert!(result.contains("{% set x = 1 %}"));
+        assert!(result.contains("-- after"));
+        assert!(result.contains("select 1"));
+    }
+
+    // Edge cases
+
+    #[test]
+    fn only_jinja_set() {
+        let input = "{% set x = 1 %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set"));
+    }
+
+    #[test]
+    fn only_jinja_for() {
+        let input = "{% for i in range(3) %}\n{% endfor %}";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% for"));
+    }
+
+    #[test]
+    fn jinja_with_whitespace_around() {
+        let input = "  \n{% set x = 1 %}\n  \nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set"));
+        assert!(result.contains("select 1"));
+    }
+
+    // Whitespace control markers
+
+    #[test]
+    fn jinja_trim_markers_leading() {
+        let input = "{%- set x = 1 -%}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("set x = 1")); // Preserves original
+    }
+
+    #[test]
+    fn jinja_trim_markers_after_comment() {
+        let input = "-- comment\n{%- set x = 1 -%}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- comment"));
+        assert!(result.contains("set x = 1"));
+    }
+
+    // Complex real-world cases
+
+    #[test]
+    fn dbt_style_set_and_query() {
+        let input = r#"-- Configure variables
+{% set columns = ['id', 'name', 'email'] %}
+
+-- Main query
+SELECT
+    {{ columns | join(', ') }}
+FROM users
+WHERE active = true;"#;
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set columns"));
+        assert!(result.contains("{{ columns | join"));
+        assert!(result.contains("-- Configure"));
+        assert!(result.contains("-- Main query"));
+    }
+
+    #[test]
+    fn multiple_sets_with_queries() {
+        let input = r#"{% set table1 = 'users' %}
+{% set table2 = 'orders' %}
+
+SELECT * FROM {{ table1 }};
+
+{% set limit_val = 100 %}
+
+SELECT * FROM {{ table2 }} LIMIT {{ limit_val }};"#;
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set table1"));
+        assert!(result.contains("{% set table2"));
+        assert!(result.contains("{% set limit_val"));
+    }
+
+    // Multiple statements with Jinja between
+
+    #[test]
+    fn three_statements_with_jinja_between() {
+        let input = "SELECT 1;\n{% set x = 2 %}\nSELECT 2;\n{% set y = 3 %}\nSELECT 3;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("select 1;"));
+        assert!(result.contains("{% set x"));
+        assert!(result.contains("select 2;"));
+        assert!(result.contains("{% set y"));
+        assert!(result.contains("select 3;"));
+    }
+
+    #[test]
+    fn alternating_comments_and_jinja() {
+        let input = "-- c1\n{% set a = 1 %}\n-- c2\n{% set b = 2 %}\n-- c3\nSELECT {{ a }}, {{ b }};";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- c1"));
+        assert!(result.contains("{% set a"));
+        assert!(result.contains("-- c2"));
+        assert!(result.contains("{% set b"));
+        assert!(result.contains("-- c3"));
+    }
+
+    // Jinja comments
+
+    #[test]
+    fn jinja_comment_preserved() {
+        let input = "{# This is a jinja comment #}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{# This is a jinja comment #}"));
+    }
+
+    #[test]
+    fn jinja_comment_after_sql_comment() {
+        let input = "-- SQL comment\n{# Jinja comment #}\nSELECT 1;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("-- SQL comment"));
+        assert!(result.contains("{# Jinja comment #}"));
+    }
+
+    // SQL hints with Jinja
+
+    #[test]
+    fn sql_hint_with_jinja_before() {
+        let input = "{% set x = 1 %}\nSELECT /*+ PARALLEL(8) */ * FROM t;";
+        let result = format(input).expect("format should succeed");
+        assert!(result.contains("{% set"));
+        assert!(result.contains("/*+ PARALLEL"));
+    }
+}
+
+// =============================================================================
+// JINJA STATEMENT LEVEL IDEMPOTENCY TESTS
+// =============================================================================
+
+mod jinja_statement_level_idempotency {
+    use super::*;
+
+    #[test]
+    fn idempotent_jinja_set_after_comment() {
+        let input = "-- comment\n{% set x = 1 %}\nSELECT 1;";
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn idempotent_jinja_for_after_comment() {
+        let input = "-- comment\n{% for i in range(3) %}\nSELECT {{ i }};\n{% endfor %}";
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn idempotent_complex_jinja_comments() {
+        let input = r#"-- Header
+{% set x = 1 %}
+-- Middle
+SELECT {{ x }};
+-- Footer
+{% set y = 2 %}
+SELECT {{ y }};"#;
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn idempotent_multiple_statements_with_jinja() {
+        let input = "SELECT 1;\n{% set x = 2 %}\nSELECT 2;\n{% set y = 3 %}\nSELECT 3;";
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn idempotent_jinja_and_comments_interleaved() {
+        let input = "-- c1\n{% set a = 1 %}\n-- c2\n{% set b = 2 %}\nSELECT {{ a }}, {{ b }};";
+        assert_idempotent(input);
+    }
+}
