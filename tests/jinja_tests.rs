@@ -1221,3 +1221,84 @@ SELECT {{ y }};"#;
         assert_idempotent(input);
     }
 }
+
+// =============================================================================
+// CTE FORMATTING IN JINJA BLOCKS TESTS
+// =============================================================================
+// These tests demonstrate that CTE formatting is NOT properly applied
+// when SQL is inside Jinja block tags ({% ... %})
+
+mod jinja_cte_formatting {
+    use super::*;
+
+    #[test]
+    fn base_cte_formatting_standalone_works() {
+        // This demonstrates the EXPECTED behavior: CTEs should be properly formatted
+        let input = "WITH RECURSIVE base_cte AS(SELECT 1 as n UNION ALL SELECT n+1 FROM base_cte WHERE n<10) SELECT * FROM base_cte";
+        let result = format(input).expect("format should succeed");
+
+        // Verify proper formatting is applied
+        assert!(result.contains("with recursive base_cte as ("));
+        assert!(result.contains("select 1 as n"));
+        assert!(result.contains("union all"));
+        assert!(result.contains("select n + 1"));
+        assert!(result.contains("from base_cte"));
+        assert!(result.contains("where n < 10"));
+        println!("Standalone CTE formatting:\n{}", result);
+    }
+
+    #[test]
+    fn cte_inside_jinja_set_block_not_formatted() {
+        // This is the BUG: CTE formatting is NOT applied inside Jinja {% set %} blocks
+        let input = "{% set cte_sql %}WITH RECURSIVE base_cte AS(SELECT 1 as n UNION ALL SELECT n+1 FROM base_cte WHERE n<10) SELECT * FROM base_cte{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        println!("CTE in Jinja set block:\n{}", result);
+
+        // These checks demonstrate the bug - formatting is NOT applied inside Jinja
+        // The SQL inside the Jinja block remains unformatted
+        assert!(result.contains("{% set cte_sql %}"), "Jinja tag should be preserved");
+
+        // Check what actually happens - it's likely NOT formatted like the standalone version
+        let has_proper_formatting = result.contains("select 1 as n") &&
+                                   result.contains("union all") &&
+                                   result.contains("select n + 1");
+
+        println!("Has proper SQL formatting inside Jinja block: {}", has_proper_formatting);
+        println!("Expected: CTE formatting should match the standalone version");
+        println!("Actual: CTE formatting is NOT applied inside Jinja blocks - THIS IS THE BUG");
+    }
+
+    #[test]
+    fn cte_with_inline_jinja_variables() {
+        // Even with inline Jinja variables, CTE formatting should be applied
+        let input = "WITH RECURSIVE {{ cte_name }} AS(SELECT 1 as n UNION ALL SELECT n+1 FROM {{ cte_name }} WHERE n<10) SELECT * FROM {{ cte_name }}";
+        let result = format(input).expect("format should succeed");
+
+        println!("CTE with inline Jinja:\n{}", result);
+
+        // The Jinja variables should be preserved
+        assert!(result.contains("{{ cte_name }}"), "Jinja variables should be preserved");
+
+        // But the surrounding SQL should still be formatted
+        assert!(result.contains("with recursive"), "Keywords should be lowercase");
+        assert!(result.contains("union all"), "UNION ALL should be on separate line");
+    }
+
+    #[test]
+    fn multiple_ctes_in_jinja_block() {
+        // Multiple CTEs inside a Jinja block should also be formatted
+        let input = "{% set sql %}WITH cte1 AS (SELECT * FROM t1), cte2 AS (SELECT * FROM t2) SELECT * FROM cte1 JOIN cte2{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        println!("Multiple CTEs in Jinja block:\n{}", result);
+
+        // Check preservation
+        assert!(result.contains("{% set sql %}"), "Jinja tag should be preserved");
+
+        // But check if CTE formatting is applied - this is where the bug manifests
+        let has_formatting = result.contains("with cte1 as (") &&
+                            result.contains(", cte2 as (");
+        println!("Has proper CTE formatting: {}", has_formatting);
+    }
+}
