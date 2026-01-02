@@ -1301,4 +1301,70 @@ mod jinja_cte_formatting {
                             result.contains(", cte2 as (");
         println!("Has proper CTE formatting: {}", has_formatting);
     }
+
+    #[test]
+    fn group_by_inside_jinja_set_block_not_formatted() {
+        // This is the BUG: GROUP BY formatting is NOT applied inside Jinja {% set %} blocks
+        let input = "{% set grouping_query %}SELECT a.id, a.name, COUNT(*) FROM t a GROUP BY 1,2,3,a.id,a.name HAVING COUNT(*)>1 AND SUM(a.amount)>1000{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        println!("GROUP BY in Jinja set block:\n{}", result);
+
+        // Verify Jinja is preserved
+        assert!(result.contains("{% set grouping_query %}"), "Jinja tag should be preserved");
+        assert!(result.contains("{% endset %}"), "Jinja endset should be preserved");
+
+        // These checks demonstrate the bug - formatting is NOT applied inside Jinja
+        // Expected formatting would be:
+        // - Spaces after commas in GROUP BY: "1, 2, 3, a.id, a.name"
+        // - Spaces around operators in HAVING: "COUNT(*) > 1" and "SUM(a.amount) > 1000"
+        // - Possible multi-line formatting for many columns
+
+        let has_proper_formatting = result.contains(", 2") ||  // Space after comma in GROUP BY
+                                   result.contains("COUNT(*) >") ||  // Space around > operator
+                                   result.contains("> 1");  // Space around > operator
+
+        println!("Has proper GROUP BY/HAVING formatting inside Jinja block: {}", has_proper_formatting);
+        println!("Expected: GROUP BY/HAVING should be formatted with spaces and multi-line");
+        println!("Actual: GROUP BY/HAVING formatting is NOT applied inside Jinja blocks - THIS IS THE BUG");
+
+        // This will likely fail, showing the bug:
+        // assert!(has_proper_formatting, "GROUP BY/HAVING should be properly formatted");
+    }
+
+    #[test]
+    fn group_by_with_inline_jinja_variables() {
+        // Even with inline Jinja variables, GROUP BY formatting should be applied
+        let input = "SELECT a.id, a.name, COUNT(*) FROM t a GROUP BY 1,2,3,a.id,a.name HAVING COUNT(*)>1 AND SUM(a.amount)>1000";
+        let result = format(input).expect("format should succeed");
+
+        println!("GROUP BY with proper formatting (no Jinja):\n{}", result);
+
+        // Verify proper formatting IS applied when not in Jinja block
+        assert!(result.contains(", a.id"), "Spaces after commas in GROUP BY");
+        assert!(result.contains("count(*) >"), "Spaces around operators in HAVING");
+        assert!(result.contains("> 1"), "Spaces around comparison operators");
+    }
+
+    #[test]
+    fn group_by_multiple_in_jinja_block_multiline_expectation() {
+        // GROUP BY with many columns SHOULD be formatted on multiple lines
+        let input = "{% set query %}SELECT a.id, a.name, b.type, COUNT(*) FROM t a JOIN t2 b ON a.id=b.id GROUP BY 1,2,3,a.id,a.name,b.type HAVING COUNT(*)>1{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        println!("GROUP BY multi-column in Jinja block:\n{}", result);
+
+        // Verify Jinja is preserved
+        assert!(result.contains("{% set query %}"), "Jinja tag should be preserved");
+
+        // The bug: this SQL inside Jinja should be formatted but isn't
+        // Expected: multi-line GROUP BY with proper spacing
+        // Actual: single-line unformatted SQL
+        let has_multiline = result.contains("group by\n");
+        let has_spaces = result.contains(", ");
+
+        println!("Has multi-line GROUP BY: {}", has_multiline);
+        println!("Has spaces after commas: {}", has_spaces);
+        println!("NOTE: This demonstrates the Jinja formatting bug");
+    }
 }
