@@ -19,10 +19,12 @@ pub const PLACEHOLDER_PREFIX: &str = "__SQLFLIGHT_JINJA_";
 pub struct JinjaPlaceholder {
     /// The placeholder identifier (e.g., __SQLFLIGHT_JINJA_001__)
     pub id: String,
-    /// The original Jinja content
+    /// The original Jinja content (for SqlBlock, this is the inner SQL content only)
     pub original: String,
     /// The type of Jinja construct
     pub kind: JinjaKind,
+    /// For SqlBlock placeholders, the formatted version of the full block
+    pub formatted: Option<String>,
 }
 
 /// Types of Jinja constructs
@@ -34,6 +36,13 @@ pub enum JinjaKind {
     Statement,
     /// {# comment #}
     Comment,
+    /// {% set x %}...{% endset %} or {% snapshot x %}...{% endsnapshot %} - blocks with SQL content
+    SqlBlock {
+        /// The opening tag (e.g., "{% set cte_sql %}")
+        start_tag: String,
+        /// The closing tag (e.g., "{% endset %}")
+        end_tag: String,
+    },
 }
 
 /// Extract Jinja from SQL and return SQL with placeholders + mapping

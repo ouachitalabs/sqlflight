@@ -6,11 +6,13 @@ pub mod rules;
 use crate::ast::*;
 use crate::error::Result;
 use crate::jinja;
+use crate::jinja::{JinjaKind, JinjaPlaceholder};
 use crate::parser::lexer::{tokenize_with_comments, CommentToken, SpannedToken};
 use crate::parser::expr::Parser;
 use crate::parser::stmt;
 use printer::{Printer, TARGET_WIDTH};
 use rules::SELECT_COLUMN_THRESHOLD;
+use std::collections::HashMap;
 
 /// Tracks the byte position boundaries of each parsed statement
 #[derive(Debug)]
@@ -23,8 +25,21 @@ struct StatementBoundary {
 
 /// Format SQL string
 pub fn format_sql(input: &str) -> Result<String> {
+    format_sql_with_depth(input, 0)
+}
+
+/// Maximum recursion depth for nested Jinja blocks
+const MAX_JINJA_DEPTH: usize = 10;
+
+/// Format SQL string with recursion depth tracking
+fn format_sql_with_depth(input: &str, depth: usize) -> Result<String> {
     // Step 1: Extract Jinja
-    let (sql_with_placeholders, placeholders) = jinja::extract_jinja(input)?;
+    let (sql_with_placeholders, mut placeholders) = jinja::extract_jinja(input)?;
+
+    // Step 1.5: Recursively format SQL inside SqlBlock placeholders
+    if depth < MAX_JINJA_DEPTH {
+        format_sql_blocks(&mut placeholders, depth)?;
+    }
 
     // Step 2: Extract leading/trailing/inline Jinja placeholders
     let jinja_info = extract_statement_level_placeholders(&sql_with_placeholders);
@@ -38,7 +53,27 @@ pub fn format_sql(input: &str) -> Result<String> {
     // return the original with reintegrated Jinja
     let has_real_tokens = tokenize_result.tokens.iter().any(|t| !matches!(t, crate::parser::lexer::Token::Eof));
     if !has_real_tokens {
-        return Ok(jinja::reintegrate_jinja(input, &placeholders));
+        // Reconstruct from leading/trailing placeholders and body
+        let mut result = String::new();
+        for placeholder in &jinja_info.leading {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(placeholder);
+        }
+        if !jinja_info.body.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&jinja_info.body);
+        }
+        for placeholder in &jinja_info.trailing {
+            if !result.is_empty() && !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(placeholder);
+        }
+        return Ok(jinja::reintegrate_jinja(&result, &placeholders));
     }
 
     // Parse ALL statements (not just the first one)
@@ -313,6 +348,46 @@ pub fn format_sql(input: &str) -> Result<String> {
     let result = jinja::reintegrate_jinja(&result, &placeholders);
 
     Ok(result)
+}
+
+/// Recursively format SQL content inside SqlBlock placeholders
+fn format_sql_blocks(
+    placeholders: &mut HashMap<String, JinjaPlaceholder>,
+    depth: usize,
+) -> Result<()> {
+    // Collect keys to iterate (avoid borrow issues)
+    let keys: Vec<String> = placeholders.keys().cloned().collect();
+
+    for key in keys {
+        let placeholder = placeholders.get(&key).unwrap();
+
+        if let JinjaKind::SqlBlock { start_tag, end_tag } = &placeholder.kind {
+            let inner_sql = &placeholder.original;
+            let start_tag = start_tag.clone();
+            let end_tag = end_tag.clone();
+
+            // Recursively format the inner SQL
+            match format_sql_with_depth(inner_sql, depth + 1) {
+                Ok(formatted_inner) => {
+                    let formatted_inner = formatted_inner.trim();
+                    // Reconstruct the full block with formatted SQL
+                    let formatted = if formatted_inner.is_empty() {
+                        format!("{}{}", start_tag, end_tag)
+                    } else {
+                        format!("{}\n{}\n{}", start_tag, formatted_inner, end_tag)
+                    };
+                    placeholders.get_mut(&key).unwrap().formatted = Some(formatted);
+                }
+                Err(_) => {
+                    // Fallback: preserve original verbatim on parse error
+                    let formatted = format!("{}{}{}", start_tag, inner_sql, end_tag);
+                    placeholders.get_mut(&key).unwrap().formatted = Some(formatted);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Information about Jinja placeholders at statement level

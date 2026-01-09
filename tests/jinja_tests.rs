@@ -1368,3 +1368,225 @@ mod jinja_cte_formatting {
         println!("NOTE: This demonstrates the Jinja formatting bug");
     }
 }
+
+// =============================================================================
+// JINJA SQL BLOCK FORMATTING TESTS (sqlflight-muz)
+// =============================================================================
+// These tests verify that SQL inside {% set %}...{% endset %} and
+// {% snapshot %}...{% endsnapshot %} blocks is properly formatted.
+// Other block types (if, for, macro, etc.) should preserve content verbatim.
+
+mod jinja_sql_block_formatting {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // {% set %}...{% endset %} block tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn set_block_sql_is_formatted() {
+        // SQL inside {% set %} blocks should be formatted
+        let input = "{% set x %}SELECT   *   FROM   users{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        // Jinja tags should be preserved
+        assert!(result.contains("{% set x %}"), "Opening tag should be preserved");
+        assert!(result.contains("{% endset %}"), "Closing tag should be preserved");
+
+        // SQL should be formatted (lowercase keywords, proper spacing)
+        assert!(result.contains("select *"), "Keywords should be lowercase");
+        assert!(result.contains("from users"), "FROM clause should be formatted");
+    }
+
+    #[test]
+    fn set_block_cte_is_formatted() {
+        // CTE inside {% set %} blocks should be formatted
+        let input = "{% set cte_sql %}WITH base AS(SELECT 1 as n) SELECT * FROM base{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        // SQL should be formatted
+        assert!(result.contains("with base as ("), "CTE should be formatted with lowercase and spacing");
+        assert!(result.contains("select 1 as n"), "SELECT should be lowercase");
+        assert!(result.contains("select *"), "Main SELECT should be lowercase");
+        assert!(result.contains("from base"), "FROM should be lowercase");
+    }
+
+    #[test]
+    fn set_block_with_nested_jinja_expressions() {
+        // SQL with nested Jinja expressions should have SQL formatted while preserving Jinja
+        let input = "{% set x %}SELECT * FROM {{ table_name }} WHERE id = {{ id }}{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        // Jinja expressions should be preserved
+        assert!(result.contains("{{ table_name }}"), "Table Jinja should be preserved");
+        assert!(result.contains("{{ id }}"), "ID Jinja should be preserved");
+
+        // SQL should be formatted
+        assert!(result.contains("select *"), "SELECT should be lowercase");
+        assert!(result.contains("from {{ table_name }}"), "FROM should be lowercase");
+        assert!(result.contains("where id = {{ id }}"), "WHERE should be lowercase");
+    }
+
+    #[test]
+    fn set_block_group_by_is_formatted() {
+        // GROUP BY inside {% set %} blocks should be formatted
+        let input = "{% set q %}SELECT a,b,COUNT(*) FROM t GROUP BY 1,2{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        // SQL should be formatted with proper spacing
+        assert!(result.contains("select"), "Keywords should be lowercase");
+        assert!(result.contains("group by"), "GROUP BY should be lowercase");
+        assert!(result.contains("count(*)"), "COUNT should be lowercase");
+    }
+
+    #[test]
+    fn set_block_preserves_whitespace_control_markers() {
+        // Whitespace control markers should be preserved
+        let input = "{%- set x -%}SELECT * FROM users{%- endset -%}";
+        let result = format(input).expect("format should succeed");
+
+        // Whitespace control markers should be preserved
+        assert!(result.contains("{%- set x -%}") || result.contains("{%-"), "Opening trim markers should be preserved");
+        assert!(result.contains("{%- endset -%}") || result.contains("endset -%}"), "Closing trim markers should be preserved");
+
+        // SQL should still be formatted
+        assert!(result.contains("select *"), "SQL should be formatted");
+    }
+
+    #[test]
+    fn set_block_multiline_sql_is_formatted() {
+        // Multi-line SQL inside {% set %} blocks should be formatted
+        let input = r#"{% set complex_query %}
+SELECT
+    id,
+    name,
+    created_at
+FROM users
+WHERE active = TRUE
+{% endset %}"#;
+        let result = format(input).expect("format should succeed");
+
+        // SQL should be formatted (keywords lowercase)
+        assert!(result.contains("select"), "SELECT should be lowercase");
+        assert!(result.contains("from users"), "FROM should be lowercase");
+        assert!(result.contains("where active = true"), "WHERE and TRUE should be lowercase");
+    }
+
+    #[test]
+    fn set_block_idempotent() {
+        // Formatting should be idempotent
+        let input = "{% set x %}SELECT * FROM users{% endset %}";
+        assert_idempotent(input);
+    }
+
+    // -------------------------------------------------------------------------
+    // {% snapshot %}...{% endsnapshot %} block tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn snapshot_block_sql_is_formatted() {
+        // SQL inside {% snapshot %} blocks should be formatted
+        let input = "{% snapshot users_snapshot %}SELECT   *   FROM   users{% endsnapshot %}";
+        let result = format(input).expect("format should succeed");
+
+        // Jinja tags should be preserved
+        assert!(result.contains("{% snapshot users_snapshot %}"), "Opening tag should be preserved");
+        assert!(result.contains("{% endsnapshot %}"), "Closing tag should be preserved");
+
+        // SQL should be formatted
+        assert!(result.contains("select *"), "Keywords should be lowercase");
+        assert!(result.contains("from users"), "FROM clause should be formatted");
+    }
+
+    #[test]
+    fn snapshot_block_with_config() {
+        // Snapshot with config and SQL should be formatted
+        let input = r#"{% snapshot orders_snapshot %}
+{{
+    config(
+        target_schema='snapshots',
+        unique_key='id'
+    )
+}}
+SELECT   *   FROM   {{ source('shop', 'orders') }}
+{% endsnapshot %}"#;
+        let result = format(input).expect("format should succeed");
+
+        // Jinja should be preserved
+        assert!(result.contains("{% snapshot orders_snapshot %}"), "Opening tag preserved");
+        assert!(result.contains("{% endsnapshot %}"), "Closing tag preserved");
+        assert!(result.contains("{{ source('shop', 'orders') }}"), "Source macro preserved");
+
+        // SQL should be formatted
+        assert!(result.contains("select *"), "SELECT should be lowercase");
+    }
+
+    // -------------------------------------------------------------------------
+    // Other block types should preserve content verbatim
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn for_block_preserves_verbatim() {
+        // {% for %} blocks should preserve content verbatim (not format SQL inside)
+        let input = "{% for i in items %}SELECT   *   FROM   t{{ i }}{% endfor %}";
+        let result = format(input).expect("format should succeed");
+
+        // The SQL inside should NOT be formatted (preserved verbatim)
+        // because for loops generate dynamic content
+        assert!(result.contains("{% for i in items %}"), "For tag preserved");
+        assert!(result.contains("{% endfor %}"), "Endfor tag preserved");
+        // Content should be preserved as-is (uppercase SELECT, extra spaces)
+        assert!(result.contains("SELECT   *   FROM   t{{ i }}"), "Content inside for should be verbatim");
+    }
+
+    #[test]
+    fn if_block_preserves_verbatim() {
+        // {% if %} blocks should preserve content verbatim (not format SQL inside)
+        let input = "{% if cond %}SELECT   *   FROM   users{% endif %}";
+        let result = format(input).expect("format should succeed");
+
+        // Content should be preserved as-is
+        assert!(result.contains("{% if cond %}"), "If tag preserved");
+        assert!(result.contains("{% endif %}"), "Endif tag preserved");
+        assert!(result.contains("SELECT   *   FROM   users"), "Content inside if should be verbatim");
+    }
+
+    #[test]
+    fn macro_block_preserves_verbatim() {
+        // {% macro %} blocks should preserve content verbatim
+        let input = "{% macro my_macro() %}SELECT   *   FROM   users{% endmacro %}";
+        let result = format(input).expect("format should succeed");
+
+        // Content should be preserved as-is
+        assert!(result.contains("{% macro my_macro() %}"), "Macro tag preserved");
+        assert!(result.contains("{% endmacro %}"), "Endmacro tag preserved");
+        assert!(result.contains("SELECT   *   FROM   users"), "Content inside macro should be verbatim");
+    }
+
+    // -------------------------------------------------------------------------
+    // Fallback tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn set_block_fallback_on_invalid_sql() {
+        // Invalid SQL inside {% set %} should fall back to verbatim preservation
+        let input = "{% set x %}THIS IS NOT VALID SQL SYNTAX{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        // Tags should be preserved
+        assert!(result.contains("{% set x %}"), "Opening tag preserved");
+        assert!(result.contains("{% endset %}"), "Closing tag preserved");
+        // Invalid content should be preserved as-is
+        assert!(result.contains("THIS IS NOT VALID SQL SYNTAX"), "Invalid SQL preserved verbatim");
+    }
+
+    #[test]
+    fn set_block_empty_content_preserved() {
+        // Empty {% set %} block should be preserved
+        let input = "{% set x %}{% endset %}";
+        let result = format(input).expect("format should succeed");
+
+        assert!(result.contains("{% set x %}"), "Opening tag preserved");
+        assert!(result.contains("{% endset %}"), "Closing tag preserved");
+    }
+}

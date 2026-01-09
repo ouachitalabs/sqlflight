@@ -10,26 +10,28 @@ use std::collections::HashMap;
 /// Block-forming Jinja tags that should be extracted as a single placeholder.
 /// This includes both tags with non-SQL content AND control flow blocks that cannot
 /// be parsed as valid SQL (because they contain alternative branches, not cumulative content).
-/// Format: (start_keyword, end_tag, is_always_block)
-/// is_always_block: true if the tag is always block-forming (not conditional like set)
-const BLOCK_FORMING_TAGS: &[(&str, &str, bool)] = &[
-    ("set", "endset", false),       // Only block if no '=' ({% set x %}...{% endset %})
-    ("macro", "endmacro", true),    // Macro content is template code, not SQL
-    ("call", "endcall", true),      // Call blocks contain template code
-    ("snapshot", "endsnapshot", false), // Snapshot contains SQL - treat each tag separately
-    ("filter", "endfilter", true),  // Filter blocks contain template expressions
-    ("block", "endblock", true),    // Block content is template code
-    ("raw", "endraw", true),        // Raw blocks are never processed
-    ("for", "endfor", true),        // For loops generate dynamic content
-    ("if", "endif", true),          // If blocks have alternative branches - not valid SQL as-is
+/// Format: (start_keyword, end_tag, is_always_block, format_sql_content)
+/// - is_always_block: true if the tag is always block-forming (not conditional like set)
+/// - format_sql_content: true if the content should be formatted as SQL (vs preserved verbatim)
+const BLOCK_FORMING_TAGS: &[(&str, &str, bool, bool)] = &[
+    ("set", "endset", false, true),       // Only block if no '=' - format SQL inside
+    ("macro", "endmacro", true, false),   // Macro content is template code, not SQL
+    ("call", "endcall", true, false),     // Call blocks contain template code
+    ("snapshot", "endsnapshot", false, true), // Snapshot contains SQL - format it
+    ("filter", "endfilter", true, false), // Filter blocks contain template expressions
+    ("block", "endblock", true, false),   // Block content is template code
+    ("raw", "endraw", true, false),       // Raw blocks are never processed
+    ("for", "endfor", true, false),       // For loops generate dynamic content
+    ("if", "endif", true, false),         // If blocks have alternative branches - not valid SQL as-is
 ];
 
 /// Check if a statement content starts with a block-forming keyword that uses raw content
 /// (i.e., {% set name %} without assignment)
-fn is_raw_content_block(content: &str) -> Option<&'static str> {
+/// Returns Some((end_tag, format_sql_content)) if block-forming, None otherwise
+fn is_raw_content_block(content: &str) -> Option<(&'static str, bool)> {
     let trimmed = content.trim();
 
-    for (start_keyword, end_tag, is_always_block) in BLOCK_FORMING_TAGS {
+    for (start_keyword, end_tag, is_always_block, format_sql) in BLOCK_FORMING_TAGS {
         if trimmed.starts_with(start_keyword) {
             // Check that it's followed by a space or end (not part of a longer word)
             let after_keyword = &trimmed[start_keyword.len()..];
@@ -39,17 +41,16 @@ fn is_raw_content_block(content: &str) -> Option<&'static str> {
 
             if *is_always_block {
                 // These are always block-forming
-                return Some(end_tag);
+                return Some((end_tag, *format_sql));
             }
 
-            // For set, it's a block form if there's NO '=' after the variable name
-            if *start_keyword == "set" {
+            // For set/snapshot, it's a block form if there's NO '=' after the variable name
+            if *start_keyword == "set" || *start_keyword == "snapshot" {
                 let rest = after_keyword.trim();
                 if !rest.contains('=') && !rest.is_empty() {
-                    return Some(end_tag);
+                    return Some((end_tag, *format_sql));
                 }
             }
-            // For if, we don't treat it as a raw content block since the content is SQL
         }
     }
     None
@@ -88,7 +89,7 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                     let stmt = extract_until_statement_end(&mut chars)?;
 
                     // Check if this is a block-forming statement with raw content
-                    if let Some(end_tag) = is_raw_content_block(&stmt.content) {
+                    if let Some((end_tag, format_sql)) = is_raw_content_block(&stmt.content) {
                         // Extract until we find the matching end tag
                         let block_content = extract_block_content(&mut chars, end_tag)?;
                         // Preserve whitespace control markers
@@ -96,20 +97,36 @@ pub fn extract(input: &str) -> Result<(String, HashMap<String, JinjaPlaceholder>
                         let end_marker = if stmt.ends_with_trim { "-%}" } else { "%}" };
                         let end_start = if block_content.end_starts_trim { "{%-" } else { "{%" };
                         let end_end = if block_content.end_ends_trim { "-%}" } else { "%}" };
-                        let full_original = format!(
-                            "{}{}{}{}{} {} {}",
-                            start_marker, stmt.content, end_marker,
-                            block_content.content,
-                            end_start, end_tag, end_end
-                        );
 
-                        let placeholder = JinjaPlaceholder {
-                            id: format!("{}{:03}__", PLACEHOLDER_PREFIX, {
-                                counter += 1;
-                                counter
-                            }),
-                            original: full_original,
-                            kind: JinjaKind::Statement,
+                        let start_tag_str = format!("{}{}{}", start_marker, stmt.content, end_marker);
+                        let end_tag_str = format!("{} {} {}", end_start, end_tag, end_end);
+
+                        counter += 1;
+                        let placeholder = if format_sql {
+                            // For SQL blocks, store inner content separately for formatting
+                            JinjaPlaceholder {
+                                id: format!("{}{:03}__", PLACEHOLDER_PREFIX, counter),
+                                original: block_content.content.clone(),
+                                kind: JinjaKind::SqlBlock {
+                                    start_tag: start_tag_str,
+                                    end_tag: end_tag_str,
+                                },
+                                formatted: None,
+                            }
+                        } else {
+                            // For non-SQL blocks, store full block verbatim
+                            let full_original = format!(
+                                "{}{}{}",
+                                start_tag_str,
+                                block_content.content,
+                                end_tag_str
+                            );
+                            JinjaPlaceholder {
+                                id: format!("{}{:03}__", PLACEHOLDER_PREFIX, counter),
+                                original: full_original,
+                                kind: JinjaKind::Statement,
+                                formatted: None,
+                            }
                         };
                         // Add space if previous char was alphanumeric to prevent merging
                         if result.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
@@ -317,15 +334,17 @@ fn extract_until_statement_end(
 fn create_placeholder(counter: &mut usize, content: String, kind: JinjaKind) -> JinjaPlaceholder {
     *counter += 1;
     let id = format!("{}{:03}__", PLACEHOLDER_PREFIX, counter);
-    let original = match kind {
+    let original = match &kind {
         JinjaKind::Expression => format!("{{{{{}}}}}", content),
         JinjaKind::Statement => format!("{{%{}%}}", content),
         JinjaKind::Comment => format!("{{#{}#}}", content),
+        JinjaKind::SqlBlock { .. } => content.clone(), // SqlBlock stores inner content only
     };
     JinjaPlaceholder {
         id,
         original,
         kind,
+        formatted: None,
     }
 }
 
@@ -345,6 +364,7 @@ fn create_placeholder_with_trim(
         id,
         original,
         kind: JinjaKind::Statement,
+        formatted: None,
     }
 }
 
